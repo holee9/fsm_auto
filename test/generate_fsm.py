@@ -488,10 +488,9 @@ def generate_mermaid_fsm_diagram(fsm_config_path, lut_ram_config_path, output_fi
     # Define states
     for state in states_data:
         state_name = state['name']
-        # Add a description for the state if it has outputs
         output_desc = []
-        for out_name, out_val in state['outputs'].items():
-            # Exclude default/computed outputs for cleaner diagram if desired
+        # .get()을 사용하여 'outputs' 키가 없을 경우를 대비합니다.
+        for out_name, out_val in state.get('outputs', {}).items():
             if out_name not in ['current_state_o', 'busy_o', 'sequence_done_o'] and \
                not out_name.startswith('current_') and not out_name.endswith('_o'):
                 output_desc.append(f"{out_name}={out_val}")
@@ -499,7 +498,7 @@ def generate_mermaid_fsm_diagram(fsm_config_path, lut_ram_config_path, output_fi
         if output_desc:
             mermaid_lines.append(f"    state {state_name} : {', '.join(output_desc)}")
         else:
-            mermaid_lines.append(f"    state {state_name}") # State without specific outputs
+            mermaid_lines.append(f"    state {state_name}")
 
     mermaid_lines.append("\n")
 
@@ -510,41 +509,47 @@ def generate_mermaid_fsm_diagram(fsm_config_path, lut_ram_config_path, output_fi
     for state in states_data:
         state_name = state['name']
         
-        # Handle IDLE state transitions (from LUT RAM lookup)
         if state_name == "IDLE":
             mermaid_lines.append(f"    IDLE --> State_from_LUT : command_id_i (LUT Lookup)")
-            mermaid_lines.append(f"    state State_from_LUT <<choice>>") # A choice node
+            mermaid_lines.append(f"    state State_from_LUT <<choice>>")
             
-            common_next_states = set()
-            for entry in lut_ram_config['lut_entries']:
-                common_next_states.add(entry['next_state'])
+            next_states_from_lut = set(entry['next_state'] for entry in lut_ram_config['lut_entries'])
             
-            for next_s in sorted(list(common_next_states)):
-                if next_s != "IDLE":
-                    mermaid_lines.append(f"    State_from_LUT --> {next_s}")
+            for next_s in sorted(list(next_states_from_lut)):
+                # LUT에서 전이될 수 있는 각 상태에 대해 command_id_i를 조건으로 명시
+                # 실제 command_id_i 값 대신 상태 이름을 조건으로 사용하는 것이 다이어그램에서 더 직관적입니다.
+                mermaid_lines.append(f"    State_from_LUT --> {next_s} : command_id_i == \"{next_s}\"")
             
-            pass 
-
-        # Handle explicit transitions for other states
         else:
-            transition_added_to_idle = False
+            has_explicit_transition_to_self = False # 'True' 조건으로 자기 자신에게 가는 전이 여부 확인
+            explicit_transitions = []
             for transition in state['transitions']:
                 condition = transition['condition'].replace('&&', ' and ').replace('||', ' or ').replace("'", "")
                 next_s = transition['next_state']
-                if next_s == "IDLE":
-                    transition_added_to_idle = True
-                mermaid_lines.append(f"    {state_name} --> {next_s} : {condition}")
-            
-            # Add default transition to IDLE if no other explicit transition was found
-            if not transition_added_to_idle and state_name != "IDLE":
-                mermaid_lines.append(f"    {state_name} --> IDLE : (Task Completed / Default)")
+                
+                explicit_transitions.append(f"    {state_name} --> {next_s} : {condition}")
+                
+                if condition == "True" and next_s == state_name:
+                    has_explicit_transition_to_self = True
+
+            # 명시적 전이를 먼저 추가합니다.
+            mermaid_lines.extend(explicit_transitions)
+
+            # 'else' 전이 추가 로직 (기존 FSM의 동작 방식과 Mermaid의 'else' 문법을 고려)
+            # 조건이 명시적으로 'True'가 아니면서 자기 자신에게 가는 전이가 없다면 'else'를 추가
+            if not has_explicit_transition_to_self:
+                # FSM 시뮬레이터와 Verilog 생성 코드는 명시된 전이가 없으면 기본적으로 IDLE로 갑니다.
+                # 하지만, 수정된 Mermaid 코드에서는 'else'일 때 자기 자신에게 머무는 것으로 표현되어 있습니다.
+                # Mermaid 다이어그램의 의도를 반영하기 위해 'else'는 자기 자신에게 머무는 것으로 합니다.
+                # 만약 IDLE로 가야 한다면, 해당 상태의 YAML에 'True' 조건으로 IDLE 전이를 명시하는 것이 좋습니다.
+                mermaid_lines.append(f"    {state_name} --> {state_name} : else")
     
-    # Optional: Add a note about the RST state special functionality
-    mermaid_lines.append("\n    note over RST")
-    mermaid_lines.append("        LUT RAM Read/Write Mode")
-    mermaid_lines.append("        Address auto-increments with each access.")
-    mermaid_lines.append("        lut_read_write_mode_i: 0=Read, 1=Write")
-    mermaid_lines.append("        lut_access_en_i triggers access & increment")
+    # Updated note block position and content formatting
+    mermaid_lines.append("\n    note right of RST")
+    mermaid_lines.append("        LUT RAM Read/Write Mode:")
+    mermaid_lines.append("        - Address auto-increments with each access.")
+    mermaid_lines.append("        - lut_read_write_mode_i: 0=Read, 1=Write")
+    mermaid_lines.append("        - lut_access_en_i triggers access & increment.")
     mermaid_lines.append("    end note")
 
     mermaid_lines.append("```")
@@ -552,7 +557,6 @@ def generate_mermaid_fsm_diagram(fsm_config_path, lut_ram_config_path, output_fi
     with open(output_file, 'w') as f:
         f.write("\n".join(mermaid_lines))
     logging.info(f"Mermaid State Diagram generated successfully: {output_file}")
-
 
 # --- Main Execution ---
 if __name__ == "__main__":

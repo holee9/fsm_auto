@@ -1,0 +1,98 @@
+
+fsm_name: sequencer_fsm
+state_encoding_width: 3
+
+inputs:
+  - name: clk
+    type: std_logic
+  - name: reset_n
+    type: std_logic
+  - name: command_id_i
+    type: std_logic_vector(7 downto 0)
+
+  - name: task_done_i
+    type: std_logic
+  - name: adc_ready_i
+    type: std_logic
+  - name: sensor_stable_i
+    type: std_logic
+  - name: aed_detected_i
+    type: std_logic
+
+outputs:
+  - name: current_state_o
+    type: std_logic_vector(2 downto 0)
+  - name: busy_o
+    type: std_logic
+  - name: sequence_done_o
+    type: std_logic
+
+  - name: current_repeat_count_o
+    type: std_logic_vector(7 downto 0)
+  - name: current_data_length_o
+    type: std_logic_vector(15 downto 0)
+  - name: current_eof_o
+    type: std_logic
+  - name: current_sof_o
+    type: std_logic
+
+states:
+  - name: IDLE
+    outputs: {busy_o: '0', sequence_done_o: '0', current_repeat_count_o: "8'h00", current_data_length_o: "16'h0000", current_eof_o: '0', current_sof_o: '0'}
+    transitions: []
+
+  - name: RST
+    outputs: {busy_o: '1', sequence_done_o: '0'}
+    transitions:
+      - condition: "task_done_i == '1'"
+        next_state: IDLE
+      - condition: "True"
+        next_state: RST
+
+  - name: BACK_BIAS
+    outputs: {busy_o: '1', sequence_done_o: '0'}
+    transitions:
+      - condition: "task_done_i == '1'"
+        next_state: IDLE
+      - condition: "True"
+        next_state: BACK_BIAS
+
+  - name: FLUSH
+    outputs: {busy_o: '1', sequence_done_o: '0'}
+    transitions:
+      - condition: "task_done_i == '1'"
+        next_state: IDLE
+      - condition: "True"
+        next_state: FLUSH
+
+  - name: EXPOSE_TIME
+    outputs: {busy_o: '1', sequence_done_o: '0'}
+    transitions:
+      - condition: "task_done_i == '1'"
+        next_state: IDLE
+      - condition: "True"
+        next_state: EXPOSE_TIME
+
+  - name: READOUT
+    outputs: {busy_o: '1', sequence_done_o: '0'}
+    transitions:
+      - condition: "task_done_i == '1' && adc_ready_i == '1'"
+        next_state: IDLE
+      - condition: "True"
+        next_state: READOUT
+
+  - name: AED_DETECT
+    outputs: {busy_o: '1', sequence_done_o: '0'}
+    transitions:
+      - condition: "aed_detected_i == '1'"
+        next_state: IDLE
+      - condition: "True"
+        next_state: AED_DETECT
+
+  - name: PANEL_STABLE
+    outputs: {busy_o: '1', sequence_done_o: '0'}
+    transitions:
+      - condition: "sensor_stable_i == '1'"
+        next_state: IDLE
+      - condition: "True"
+        next_state: PANEL_STABLE

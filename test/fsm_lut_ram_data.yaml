@@ -1,0 +1,44 @@
+
+lut_ram_config:
+  address_width: 8
+  param_fields:
+    - name: repeat_count
+      width: 8
+    - name: data_length
+      width: 16
+    - name: eof
+      width: 1
+    - name: sof
+      width: 1
+
+lut_entries:
+  - address: 0x00
+    next_state: RST
+    repeat_count: 1
+    data_length: 1024
+    eof: 0
+    sof: 1
+  - address: 0x01
+    next_state: FLUSH
+    repeat_count: 1
+    data_length: 0
+    eof: 0
+    sof: 0
+  - address: 0x02
+    next_state: AED_DETECT
+    repeat_count: 1
+    data_length: 0
+    eof: 0
+    sof: 0
+  - address: 0x03
+    next_state: EXPOSE_TIME
+    repeat_count: 1
+    data_length: 0
+    eof: 1
+    sof: 0
+  - address: 0xFF
+    next_state: IDLE
+    repeat_count: 0
+    data_length: 0
+    eof: 0
+    sof: 0
