@@ -14,15 +14,15 @@ lut_ram_config:
 lut_entries:
   - address: 0x00 # Sequence start (PANEL_STABLE)
     next_state: PANEL_STABLE
-    repeat_count: 2
+    repeat_count: 5
     data_length: 100
     eof: 0
     sof: 0
 
   - address: 0x01 # BACK_BIAS
     next_state: BACK_BIAS
-    repeat_count: 4
-    data_length: 10
+    repeat_count: 1
+    data_length: 0
     eof: 0
     sof: 0
 
@@ -36,13 +36,13 @@ lut_entries:
   - address: 0x03 # EXPOSE_TIME
     next_state: EXPOSE_TIME
     repeat_count: 1
-    data_length: 500
+    data_length: 5000
     eof: 0
     sof: 0
 
   - address: 0x04 # READOUT (End of this sequence)
     next_state: READOUT
     repeat_count: 1
-    data_length: 300
+    data_length: 4096
     eof: 1
     sof: 0

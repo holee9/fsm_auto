@@ -3,7 +3,6 @@
 module sequencer_fsm (
     input logic clk,
     input logic reset_i,
-    input logic exit_signal_i;,
     input logic lut_wen_i; // LUT Write Enable (active high, only in RST state),
     input logic [28:0] lut_write_data_i; // Data to write to LUT RAM,
     input logic lut_rden_i; // LUT Read Enable (active high, only in RST state),
@@ -36,9 +35,7 @@ module sequencer_fsm (
 
     // LUT Address Register. This points to the current LUT entry being processed.
     logic [7:0] lut_addr_reg; 
-    logic [8:0] data_length_timer; // Timer for data_length parameter
-    logic [1:0] active_repeat_count; // Counter for repeat_count parameter
-    // Simulated internal task completion signals - These are for simulation purposes only, not external inputs.
+    // Simulated internal task completion signals
     logic internal_task_done;
     logic internal_adc_ready;
     logic internal_sensor_stable;
@@ -64,112 +61,75 @@ module sequencer_fsm (
         if (reset_i) begin // Reset asserted (active high)
             current_state_reg <= RST; // Go to RST state on reset assertion
             lut_addr_reg <= 8'h00; // Initialize LUT address for RAM config
-            data_length_timer <= '0;
-            active_repeat_count <= '0;
         end else begin
             case (current_state_reg)
                 RST: begin
                     // Reset de-asserted: transition to the first sequence state (from LUT[0x00])
                     current_state_reg <= lut_ram[8'h00][28:26]; 
                     lut_addr_reg <= 8'h00; // Reset address for sequence execution
-                    data_length_timer <= lut_ram[8'h00][current_data_length_lsb + current_data_length_width - 1 : current_data_length_lsb]; // Initialize data_length_timer for the first command
-                    active_repeat_count <= lut_ram[8'h00][current_repeat_count_lsb + current_repeat_count_width - 1 : current_repeat_count_lsb]; // Initialize active_repeat_count for the first command
                 end
                 IDLE: begin
-                    // In IDLE, process repeat and EOF logic, then determine next state and address
-                    if (active_repeat_count > 0) begin // If current command needs to be repeated
-                        active_repeat_count <= active_repeat_count - 1; // Decrement repeat counter
-                        // Stay at the same lut_addr_reg to re-execute the command
-                        current_state_reg <= next_state_from_lut; // Go back to the command state
-                        data_length_timer <= current_data_length; // Re-initialize data_length_timer
-                    end else if (current_repeat_count == 0 && exit_signal_i) begin // Infinite repeat and exit signal is asserted
-                        lut_addr_reg <= lut_addr_reg + 1; // Move to the next command
-                        current_state_reg <= lut_ram[lut_addr_reg + 1][28:26]; // Transition to the next state
-                        data_length_timer <= lut_ram[lut_addr_reg + 1][current_data_length_lsb + current_data_length_width - 1 : current_data_length_lsb]; // Initialize data_length_timer for the next command
-                        active_repeat_count <= lut_ram[lut_addr_reg + 1][current_repeat_count_lsb + current_repeat_count_width - 1 : current_repeat_count_lsb]; // Initialize active_repeat_count for the next command
-                    end else if (current_eof) begin // End of sequence, loop back to 0x00
+                    // In IDLE, increment lut_addr_reg and determine next state
+                    if (current_eof) begin // If the *current* command (that just completed) was EOF
                         lut_addr_reg <= 8'h00; // Loop back to start of sequence
                         current_state_reg <= lut_ram[8'h00][28:26]; // Go to state from LUT[0x00]
-                        data_length_timer <= lut_ram[8'h00][current_data_length_lsb + current_data_length_width - 1 : current_data_length_lsb]; // Initialize data_length_timer for first command
-                        active_repeat_count <= lut_ram[8'h00][current_repeat_count_lsb + current_repeat_count_width - 1 : current_repeat_count_lsb]; // Initialize active_repeat_count for first command
-                    end else begin // Proceed to the next command in sequence
+                    end else begin
                         lut_addr_reg <= lut_addr_reg + 1; // Increment for the next command
+                        // In the next cycle, lut_addr_reg will be updated, so current_state_reg will then read lut_ram[new_lut_addr_reg]
                         current_state_reg <= lut_ram[lut_addr_reg + 1][28:26]; // Go to next state from LUT for (current lut_addr_reg + 1)
-                        data_length_timer <= lut_ram[lut_addr_reg + 1][current_data_length_lsb + current_data_length_width - 1 : current_data_length_lsb]; // Initialize data_length_timer for next command
-                        active_repeat_count <= lut_ram[lut_addr_reg + 1][current_repeat_count_lsb + current_repeat_count_width - 1 : current_repeat_count_lsb]; // Initialize active_repeat_count for next command
                     end
                 end
                 PANEL_STABLE: begin
-                    if (data_length_timer > 0) begin
-                        data_length_timer <= data_length_timer - 1; // Decrement timer
-                        current_state_reg <= PANEL_STABLE; // Stay in current state
-                    end else if (internal_sensor_stable) begin
-                        current_state_reg <= IDLE; // Task done AND data_length met, go to IDLE
-                        // lut_addr_reg and counters will be updated in IDLE
+                    if (internal_sensor_stable) begin
+                        current_state_reg <= IDLE; // Task done, go to IDLE to update address and transition
                     end else begin
                         current_state_reg <= PANEL_STABLE; // Stay in current state
                     end
+                    lut_addr_reg <= lut_addr_reg; 
                 end
                 BACK_BIAS: begin
-                    if (data_length_timer > 0) begin
-                        data_length_timer <= data_length_timer - 1; // Decrement timer
-                        current_state_reg <= BACK_BIAS; // Stay in current state
-                    end else if (internal_task_done) begin
-                        current_state_reg <= IDLE; // Task done AND data_length met, go to IDLE
-                        // lut_addr_reg and counters will be updated in IDLE
+                    if (internal_task_done) begin
+                        current_state_reg <= IDLE; // Task done, go to IDLE to update address and transition
                     end else begin
                         current_state_reg <= BACK_BIAS; // Stay in current state
                     end
+                    lut_addr_reg <= lut_addr_reg; 
                 end
                 FLUSH: begin
-                    if (data_length_timer > 0) begin
-                        data_length_timer <= data_length_timer - 1; // Decrement timer
-                        current_state_reg <= FLUSH; // Stay in current state
-                    end else if (internal_task_done) begin
-                        current_state_reg <= IDLE; // Task done AND data_length met, go to IDLE
-                        // lut_addr_reg and counters will be updated in IDLE
+                    if (internal_task_done) begin
+                        current_state_reg <= IDLE; // Task done, go to IDLE to update address and transition
                     end else begin
                         current_state_reg <= FLUSH; // Stay in current state
                     end
+                    lut_addr_reg <= lut_addr_reg; 
                 end
                 AED_DETECT: begin
-                    if (data_length_timer > 0) begin
-                        data_length_timer <= data_length_timer - 1; // Decrement timer
-                        current_state_reg <= AED_DETECT; // Stay in current state
-                    end else if (internal_aed_detected) begin
-                        current_state_reg <= IDLE; // Task done AND data_length met, go to IDLE
-                        // lut_addr_reg and counters will be updated in IDLE
+                    if (internal_aed_detected) begin
+                        current_state_reg <= IDLE; // Task done, go to IDLE to update address and transition
                     end else begin
                         current_state_reg <= AED_DETECT; // Stay in current state
                     end
+                    lut_addr_reg <= lut_addr_reg; 
                 end
                 EXPOSE_TIME: begin
-                    if (data_length_timer > 0) begin
-                        data_length_timer <= data_length_timer - 1; // Decrement timer
-                        current_state_reg <= EXPOSE_TIME; // Stay in current state
-                    end else if (internal_task_done) begin
-                        current_state_reg <= IDLE; // Task done AND data_length met, go to IDLE
-                        // lut_addr_reg and counters will be updated in IDLE
+                    if (internal_task_done) begin
+                        current_state_reg <= IDLE; // Task done, go to IDLE to update address and transition
                     end else begin
                         current_state_reg <= EXPOSE_TIME; // Stay in current state
                     end
+                    lut_addr_reg <= lut_addr_reg; 
                 end
                 READOUT: begin
-                    if (data_length_timer > 0) begin
-                        data_length_timer <= data_length_timer - 1; // Decrement timer
-                        current_state_reg <= READOUT; // Stay in current state
-                    end else if ((internal_task_done && internal_adc_ready)) begin
-                        current_state_reg <= IDLE; // Task done AND data_length met, go to IDLE
-                        // lut_addr_reg and counters will be updated in IDLE
+                    if ((internal_task_done && internal_adc_ready)) begin
+                        current_state_reg <= IDLE; // Task done, go to IDLE to update address and transition
                     end else begin
                         current_state_reg <= READOUT; // Stay in current state
                     end
+                    lut_addr_reg <= lut_addr_reg; 
                 end
                 default: begin
                     current_state_reg <= RST; // Fallback to RST on unexpected state
                     lut_addr_reg <= 8'h00;
-                    data_length_timer <= '0;
-                    active_repeat_count <= '0;
                 end
             endcase
         end
@@ -190,15 +150,7 @@ module sequencer_fsm (
         current_repeat_count = lut_read_current_addr_internal[25:18];
     end
 
-    // These are LSB positions and widths for data_length and repeat_count within LUT entry. Generated for internal use.
-    localparam DATA_LENGTH_LSB = 2;
-    localparam DATA_LENGTH_WIDTH = 16;
-    localparam REPEAT_COUNT_LSB = 18;
-    localparam REPEAT_COUNT_WIDTH = 8;
-
     // Internal Signal Generation Logic (Simulated for verification)
-    // Note: 'task_timer' here simulates how long a task takes, independent of data_length_timer.
-    // The actual FSM transition depends on 'data_length_timer == 0' AND the corresponding internal_task_done signal.
     logic [7:0] task_timer;
     always_ff @(posedge clk or posedge reset_i) begin // Active-High Reset
         if (reset_i) begin // Reset asserted
@@ -208,16 +160,12 @@ module sequencer_fsm (
             internal_sensor_stable <= 1'b0;
             internal_aed_detected <= 1'b0;
         end else begin
-            // Reset signals before new evaluation each cycle
             internal_task_done <= 1'b0;
             internal_adc_ready <= 1'b0;
             internal_sensor_stable <= 1'b0;
             internal_aed_detected <= 1'b0;
             case (current_state_reg)
-                RST, IDLE: begin
-                    task_timer <= '0; // Reset timer when in RST or IDLE
-                end
-                BACK_BIAS, FLUSH, EXPOSE_TIME: begin
+                RST, BACK_BIAS, FLUSH, EXPOSE_TIME: begin
                     if (task_timer >= 8'd20) begin
                         internal_task_done <= 1'b1;
                         task_timer <= '0;
@@ -238,7 +186,7 @@ module sequencer_fsm (
                         internal_task_done <= 1'b1;
                         internal_adc_ready <= 1'b1;
                         task_timer <= '0;
-                    end else if (task_timer >= 8'd40) begin
+                    else if (task_timer >= 8'd40) begin
                         internal_adc_ready <= 1'b1;
                         task_timer <= task_timer + 1;
                     end else begin
@@ -263,9 +211,9 @@ module sequencer_fsm (
     assign current_state_o = current_state_reg;
     // Busy if not in RST or IDLE. In this model, IDLE is a transient state between commands, so FSM is always 'busy' once sequence starts.
     assign busy_o = (current_state_reg != RST); 
-    // sequence_done_o is asserted when in IDLE, the command just completed was EOF, AND the command is not repeating.
+    // sequence_done_o is asserted when in IDLE and the command just completed was EOF (current_eof == 1'b1).
     // It will be asserted for one cycle before looping back to the first command.
-    assign sequence_done_o = (current_state_reg == IDLE && current_eof == 1'b1 && active_repeat_count == 0 && current_repeat_count == 0);
+    assign sequence_done_o = (current_state_reg == IDLE && current_eof == 1'b1);
     assign panel_enable_o = (
         current_state_reg == PANEL_STABLE
         || current_state_reg == BACK_BIAS
