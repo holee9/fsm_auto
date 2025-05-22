@@ -1,0 +1,73 @@
+lut_ram_config:
+  address_width: 8 # 2^8 = 256개의 LUT RAM 엔트리를 가질 수 있음
+  param_fields:    # LUT RAM에 저장될 파라미터 필드와 각 비트 폭 정의 (LSB부터)
+    - name: repeat_count
+      width: 8
+    - name: data_length
+      width: 16
+    - name: eof # End of Frame
+      width: 1
+    - name: sof # Start of Frame
+      width: 1
+
+# lut_ram_data_width는 fsm_config의 state_encoding_width(3) + param_fields 총 width(8+16+1+1=26) = 29비트
+# 실제 Verilog에서는 {next_state_encoding, sof, eof, data_length, repeat_count} 순으로 결합됨 (MSB부터)
+
+lut_entries:
+  # 각 주소(command_id_i)에 대한 다음 상태와 파라미터 초기값
+  - address: 0x00
+    next_state: RST
+    repeat_count: 1
+    data_length: 1024
+    eof: 0
+    sof: 1
+
+  - address: 0x01
+    next_state: FLUSH
+    repeat_count: 1
+    data_length: 0
+    eof: 0
+    sof: 0
+
+  - address: 0x02
+    next_state: AED_DETECT
+    repeat_count: 1
+    data_length: 0
+    eof: 0
+    sof: 0
+
+  - address: 0x03
+    next_state: EXPOSE_TIME
+    repeat_count: 1
+    data_length: 0
+    eof: 1 # EXPOSE_TIME 다음 IDLE로 가면 sequence_done_o가 활성화
+    sof: 0
+
+  - address: 0x04
+    next_state: READOUT
+    repeat_count: 1
+    data_length: 2048 # 예시 데이터 길이
+    eof: 0
+    sof: 0
+
+  - address: 0x05
+    next_state: BACK_BIAS
+    repeat_count: 1
+    data_length: 0
+    eof: 0
+    sof: 0
+
+  - address: 0x06
+    next_state: PANEL_STABLE
+    repeat_count: 1
+    data_length: 0
+    eof: 0
+    sof: 0
+
+  - address: 0xFF # 기본 혹은 오류 처리용 엔트리
+    next_state: IDLE
+    repeat_count: 0
+    data_length: 0
+    eof: 0
+    sof: 0
+
