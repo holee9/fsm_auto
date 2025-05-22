@@ -1,4 +1,5 @@
 ```mermaid
+%%{init: {"theme": "neutral", "themeVariables": {"primaryColor": "#ffffff"}, "layout": {"elk": {}}}}%%
 stateDiagram-v2
     direction LR
     state IDLE
