@@ -14,11 +14,16 @@ stateDiagram-v2
     [*] --> IDLE
     IDLE --> State_from_LUT : command_id_i (LUT Lookup)
     state State_from_LUT <<choice>>
-    State_from_LUT --> AED_DETECT : command_id_i == "AED_DETECT"
-    State_from_LUT --> EXPOSE_TIME : command_id_i == "EXPOSE_TIME"
-    State_from_LUT --> FLUSH : command_id_i == "FLUSH"
-    State_from_LUT --> IDLE : command_id_i == "IDLE"
     State_from_LUT --> RST : command_id_i == "RST"
+    State_from_LUT --> IDLE : command_id_i == "IDLE"
+    State_from_LUT --> PANEL_STABLE : command_id_i == "PANEL_STABLE"
+    State_from_LUT --> FLUSH : command_id_i == "FLUSH"
+    State_from_LUT --> BACK_BIAS : command_id_i == "BACK_BIAS"
+    State_from_LUT --> EXPOSE_TIME : command_id_i == "EXPOSE_TIME"
+    State_from_LUT --> READOUT : command_id_i == "READOUT"
+    State_from_LUT --> AED_DETECT : command_id_i == "AED_DETECT"
+
+
     RST --> IDLE : task_done_i == 1
     RST --> RST : True
     PANEL_STABLE --> IDLE : sensor_stable_i == 1
