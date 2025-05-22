@@ -22,12 +22,12 @@ module sequencer_fsm (
     // --- State Encoding Parameters ---
     localparam IDLE = 3'b000;
     localparam RST = 3'b001;
-    localparam BACK_BIAS = 3'b010;
-    localparam FLUSH = 3'b011;
-    localparam EXPOSE_TIME = 3'b100;
-    localparam READOUT = 3'b101;
-    localparam AED_DETECT = 3'b110;
-    localparam PANEL_STABLE = 3'b111;
+    localparam PANEL_STABLE = 3'b010;
+    localparam BACK_BIAS = 3'b011;
+    localparam FLUSH = 3'b100;
+    localparam EXPOSE_TIME = 3'b101;
+    localparam READOUT = 3'b110;
+    localparam AED_DETECT = 3'b111;
 
 
     // --- FSM State Registers ---
@@ -114,6 +114,14 @@ module sequencer_fsm (
                     next_state = RST;
                 end
             end
+            PANEL_STABLE: begin
+                if (sensor_stable_i == '1') begin
+                    next_state = IDLE;
+                end
+                if (True) begin
+                    next_state = PANEL_STABLE;
+                end
+            end
             BACK_BIAS: begin
                 if (task_done_i == '1') begin
                     next_state = IDLE;
@@ -154,14 +162,6 @@ module sequencer_fsm (
                     next_state = AED_DETECT;
                 end
             end
-            PANEL_STABLE: begin
-                if (sensor_stable_i == '1') begin
-                    next_state = IDLE;
-                end
-                if (True) begin
-                    next_state = PANEL_STABLE;
-                end
-            end
             default: begin
                 next_state = IDLE; // Fallback for unknown states
             end
@@ -182,6 +182,8 @@ module sequencer_fsm (
             end
             RST: begin
             end
+            PANEL_STABLE: begin
+            end
             BACK_BIAS: begin
             end
             FLUSH: begin
@@ -191,8 +193,6 @@ module sequencer_fsm (
             READOUT: begin
             end
             AED_DETECT: begin
-            end
-            PANEL_STABLE: begin
             end
             default: begin
                 // All outputs default to 0 for unknown states (handled above)

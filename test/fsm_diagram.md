@@ -1,15 +1,14 @@
 ```mermaid
-%%{init: {"theme": "neutral", "themeVariables": {"primaryColor": "#ffffff"}, "layout": {"elk": {}}}}%%
 stateDiagram-v2
     direction LR
     state IDLE
     state RST
+    state PANEL_STABLE
     state BACK_BIAS
     state FLUSH
     state EXPOSE_TIME
     state READOUT
     state AED_DETECT
-    state PANEL_STABLE
 
 
     [*] --> IDLE
@@ -22,6 +21,8 @@ stateDiagram-v2
     State_from_LUT --> RST : command_id_i == "RST"
     RST --> IDLE : task_done_i == 1
     RST --> RST : True
+    PANEL_STABLE --> IDLE : sensor_stable_i == 1
+    PANEL_STABLE --> PANEL_STABLE : True
     BACK_BIAS --> IDLE : task_done_i == 1
     BACK_BIAS --> BACK_BIAS : True
     FLUSH --> IDLE : task_done_i == 1
@@ -32,8 +33,6 @@ stateDiagram-v2
     READOUT --> READOUT : True
     AED_DETECT --> IDLE : aed_detected_i == 1
     AED_DETECT --> AED_DETECT : True
-    PANEL_STABLE --> IDLE : sensor_stable_i == 1
-    PANEL_STABLE --> PANEL_STABLE : True
 
     note right of RST
         LUT RAM Read/Write Mode:

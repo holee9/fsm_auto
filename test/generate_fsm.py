@@ -614,6 +614,14 @@ states:
       - condition: "True"
         next_state: RST
 
+  - name: PANEL_STABLE
+    outputs: {busy_o: '1', sequence_done_o: '0'}
+    transitions:
+      - condition: "sensor_stable_i == '1'"
+        next_state: IDLE
+      - condition: "True"
+        next_state: PANEL_STABLE
+
   - name: BACK_BIAS
     outputs: {busy_o: '1', sequence_done_o: '0'}
     transitions:
@@ -653,14 +661,6 @@ states:
         next_state: IDLE
       - condition: "True"
         next_state: AED_DETECT
-
-  - name: PANEL_STABLE
-    outputs: {busy_o: '1', sequence_done_o: '0'}
-    transitions:
-      - condition: "sensor_stable_i == '1'"
-        next_state: IDLE
-      - condition: "True"
-        next_state: PANEL_STABLE
 """)
 
     with open("fsm_lut_ram_data.yaml", "w") as f:
