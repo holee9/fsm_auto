@@ -1,203 +1,279 @@
+`timescale 1ns / 1ps
+
 module sequencer_fsm (
     input logic clk,
-    input logic reset_n,
-    input logic 7 downto 0 command_id_i,
-    input logic task_done_i,
-    input logic adc_ready_i,
-    input logic sensor_stable_i,
-    input logic aed_detected_i,
-    output logic 2 downto 0 current_state_o,
+    input logic reset_i,
+    input logic lut_wen_i; // LUT Write Enable (active high, only in RST state),
+    input logic [28:0] lut_write_data_i; // Data to write to LUT RAM,
+    input logic lut_rden_i; // LUT Read Enable (active high, only in RST state),
+    output logic [28:0] lut_read_data_o; // Data read from LUT RAM,
+    output logic [2:0] current_state_o,
     output logic busy_o,
     output logic sequence_done_o,
-    output logic 7 downto 0 current_repeat_count_o,
-    output logic 15 downto 0 current_data_length_o,
+    output logic panel_enable_o,
+    output logic bias_enable_o,
+    output logic flush_enable_o,
+    output logic expose_enable_o,
+    output logic readout_enable_o,
+    output logic aed_enable_o,
+    output logic [7:0] current_repeat_count_o,
+    output logic [15:0] current_data_length_o,
     output logic current_eof_o,
-    output logic current_sof_o,
-    input  logic                               lut_access_en_i,    // LUT RAM Access Enable (1 pulse per read/write cycle),
-    input  logic                               lut_read_write_mode_i, // 0: Read, 1: Write,
-    input  logic [29-1:0]        lut_write_data_i,   // Data to write to LUT RAM,
-    output logic [29-1:0]        lut_read_data_o     // Data read from LUT RAM
+    output logic current_sof_o
 );
 
-    // --- State Encoding Parameters ---
-    localparam IDLE = 3'b000;
-    localparam RST = 3'b001;
-    localparam PANEL_STABLE = 3'b010;
-    localparam BACK_BIAS = 3'b011;
-    localparam FLUSH = 3'b100;
-    localparam EXPOSE_TIME = 3'b101;
-    localparam READOUT = 3'b110;
-    localparam AED_DETECT = 3'b111;
+    localparam RST = 3'd0;
+    localparam IDLE = 3'd1;
+    localparam PANEL_STABLE = 3'd2;
+    localparam BACK_BIAS = 3'd3;
+    localparam FLUSH = 3'd4;
+    localparam AED_DETECT = 3'd5;
+    localparam EXPOSE_TIME = 3'd6;
+    localparam READOUT = 3'd7;
 
+    logic [2:0] current_state_reg;
 
-    // --- FSM State Registers ---
-    logic [2:0] current_state;
-    logic [2:0] next_state;
+    // LUT Address Register. This points to the current LUT entry being processed.
+    logic [7:0] lut_addr_reg; 
+    // Simulated internal task completion signals - These are for simulation purposes only, not external inputs.
+    logic internal_task_done;
+    logic internal_adc_ready;
+    logic internal_sensor_stable;
+    logic internal_aed_detected;
 
-    // --- Parameter Registers (updated from LUT RAM) ---
-    logic [25:0] current_param_combined_reg; // Holds combined parameter value
-    logic [7:0] param_repeat_count_reg;
-    logic [15:0] param_data_length_reg;
-    logic [0:0] param_eof_reg;
-    logic [0:0] param_sof_reg;
+    logic [7:0] current_repeat_count;
+    logic [15:0] current_data_length;
+    logic [0:0] current_eof;
+    logic [0:0] current_sof;
 
+    // LUT RAM Declaration
+    logic [28:0] lut_ram [0:255];
 
-    // --- FSM LUT RAM (Behavioral Model - will be synthesized to BRAM/LUT-RAM) ---
-    // Each entry stores: {next_state_encoding, combined_param_value}
-    localparam int LUT_RAM_DEPTH = 256;
-    logic [28:0] lut_ram [LUT_RAM_DEPTH-1:0];
+    // LUT data for current address (combinatorial read for FSM internal use)
+    logic [28:0] lut_read_current_addr_internal;
+    assign lut_read_current_addr_internal = lut_ram[lut_addr_reg]; 
 
-    // --- LUT RAM Address and Control Registers ---
-    logic [8-1:0] lut_current_addr_reg; // Current address for LUT RAM R/W
-    logic                               lut_internal_active;  // True when LUT RAM access is permitted/active
+    logic [2:0] next_state_from_lut;
+    assign next_state_from_lut = lut_read_current_addr_internal[28:26];
 
-    // LUT RAM access is only enabled when FSM is in RST state AND external access_en is high
-    assign lut_internal_active = (current_state == RST) && lut_access_en_i;
-
-    // LUT RAM Read Data Output: always reading from lut_current_addr_reg when internal_active, else '0
-    assign lut_read_data_o = lut_internal_active && !lut_read_write_mode_i ? lut_ram[lut_current_addr_reg] : '0; 
-
-    // --- Synchronous Logic (State, Parameters, and LUT RAM R/W) ---
-    always_ff @(posedge clk or negedge reset_n) begin
-        if (!reset_n) begin
-            current_state <= IDLE;
-            current_param_combined_reg <= '0;
-            param_repeat_count_reg <= '0;
-            param_data_length_reg <= '0;
-            param_eof_reg <= '0;
-            param_sof_reg <= '0;
-            lut_current_addr_reg <= '0;
-            for (int i = 0; i < LUT_RAM_DEPTH; i++) begin
-                lut_ram[i] <= {IDLE, {8'd0, 16'd0, 1'd0, 1'd0}};
-            end
+    // FSM State Register and LUT Address Management
+    always_ff @(posedge clk or posedge reset_i) begin // Active-High Reset
+        if (reset_i) begin // Reset asserted (active high)
+            current_state_reg <= RST; // Go to RST state on reset assertion
+            lut_addr_reg <= 8'h00; // Initialize LUT address for RAM config
         end else begin
-            // FSM State Update
-            current_state <= next_state;
-            // LUT RAM Address Increment and Write Logic
-            if (lut_internal_active) begin
-                if (lut_read_write_mode_i) begin // Write mode
-                    lut_ram[lut_current_addr_reg] <= lut_write_data_i;
+            case (current_state_reg)
+                RST: begin
+                    // Reset de-asserted: transition to the first sequence state (from LUT[0x00])
+                    current_state_reg <= lut_ram[8'h00][28:26]; 
+                    lut_addr_reg <= 8'h00; // Reset address for sequence execution
                 end
-                // Increment address after R/W, wrapping around
-                lut_current_addr_reg <= lut_current_addr_reg + 1;
-            end else if (next_state == RST && current_state != RST) begin
-                // Reset LUT RAM address when entering RST state
-                lut_current_addr_reg <= '0;
-            end
-            // FSM Parameter Registers Update
-            if (current_state == IDLE) begin // Update parameters when transitioning FROM IDLE
-                current_param_combined_reg <= lut_param_read;
-                param_repeat_count_reg <= lut_param_read[7:0];
-                param_data_length_reg <= lut_param_read[23:8];
-                param_eof_reg <= lut_param_read[24:24];
-                param_sof_reg <= lut_param_read[25:25];
-            end
+                IDLE: begin
+                    // In IDLE, increment lut_addr_reg and determine next state
+                    if (current_eof) begin // If the *current* command (that just completed) was EOF
+                        lut_addr_reg <= 8'h00; // Loop back to start of sequence
+                        current_state_reg <= lut_ram[8'h00][28:26]; // Go to state from LUT[0x00]
+                    end else begin
+                        lut_addr_reg <= lut_addr_reg + 1; // Increment for the next command
+                        // In the next cycle, lut_addr_reg will be updated, so current_state_reg will then read lut_ram[new_lut_addr_reg]
+                        current_state_reg <= lut_ram[lut_addr_reg + 1][28:26]; // Go to next state from LUT for (current lut_addr_reg + 1)
+                    end
+                end
+                PANEL_STABLE: begin
+                    if (internal_sensor_stable) begin
+                        current_state_reg <= IDLE; // Task done, go to IDLE to update address and transition
+                    end else begin
+                        current_state_reg <= PANEL_STABLE; // Stay in current state
+                    end
+                    lut_addr_reg <= lut_addr_reg; 
+                end
+                BACK_BIAS: begin
+                    if (internal_task_done) begin
+                        current_state_reg <= IDLE; // Task done, go to IDLE to update address and transition
+                    end else begin
+                        current_state_reg <= BACK_BIAS; // Stay in current state
+                    end
+                    lut_addr_reg <= lut_addr_reg; 
+                end
+                FLUSH: begin
+                    if (internal_task_done) begin
+                        current_state_reg <= IDLE; // Task done, go to IDLE to update address and transition
+                    end else begin
+                        current_state_reg <= FLUSH; // Stay in current state
+                    end
+                    lut_addr_reg <= lut_addr_reg; 
+                end
+                AED_DETECT: begin
+                    if (internal_aed_detected) begin
+                        current_state_reg <= IDLE; // Task done, go to IDLE to update address and transition
+                    end else begin
+                        current_state_reg <= AED_DETECT; // Stay in current state
+                    end
+                    lut_addr_reg <= lut_addr_reg; 
+                end
+                EXPOSE_TIME: begin
+                    if (internal_task_done) begin
+                        current_state_reg <= IDLE; // Task done, go to IDLE to update address and transition
+                    end else begin
+                        current_state_reg <= EXPOSE_TIME; // Stay in current state
+                    end
+                    lut_addr_reg <= lut_addr_reg; 
+                end
+                READOUT: begin
+                    if ((internal_task_done && internal_adc_ready)) begin
+                        current_state_reg <= IDLE; // Task done, go to IDLE to update address and transition
+                    end else begin
+                        current_state_reg <= READOUT; // Stay in current state
+                    end
+                    lut_addr_reg <= lut_addr_reg; 
+                end
+                default: begin
+                    current_state_reg <= RST; // Fallback to RST on unexpected state
+                    lut_addr_reg <= 8'h00;
+                end
+            endcase
         end
     end
 
-    logic [2:0] lut_next_state_read; 
-    logic [25:0] lut_param_read; 
-    assign {lut_next_state_read, lut_param_read} = lut_ram[command_id_i];
-
-    // --- Next State Logic (Combinational) ---
-    always_comb begin
-        next_state = current_state; // Default to current state (safety)
-        case (current_state)
-            IDLE: begin
-                next_state = lut_next_state_read; // Determined by LUT RAM lookup
-            end
-            RST: begin
-                if (task_done_i == '1') begin
-                    next_state = IDLE;
-                end
-                if (True) begin
-                    next_state = RST;
-                end
-            end
-            PANEL_STABLE: begin
-                if (sensor_stable_i == '1') begin
-                    next_state = IDLE;
-                end
-                if (True) begin
-                    next_state = PANEL_STABLE;
-                end
-            end
-            BACK_BIAS: begin
-                if (task_done_i == '1') begin
-                    next_state = IDLE;
-                end
-                if (True) begin
-                    next_state = BACK_BIAS;
-                end
-            end
-            FLUSH: begin
-                if (task_done_i == '1') begin
-                    next_state = IDLE;
-                end
-                if (True) begin
-                    next_state = FLUSH;
-                end
-            end
-            EXPOSE_TIME: begin
-                if (task_done_i == '1') begin
-                    next_state = IDLE;
-                end
-                if (True) begin
-                    next_state = EXPOSE_TIME;
-                end
-            end
-            READOUT: begin
-                if (task_done_i == '1' && adc_ready_i == '1') begin
-                    next_state = IDLE;
-                end
-                if (True) begin
-                    next_state = READOUT;
-                end
-            end
-            AED_DETECT: begin
-                if (aed_detected_i == '1') begin
-                    next_state = IDLE;
-                end
-                if (True) begin
-                    next_state = AED_DETECT;
-                end
-            end
-            default: begin
-                next_state = IDLE; // Fallback for unknown states
-            end
-        endcase
+    // lut_addr_reg auto-increment in RST state for LUT RAM configuration
+    always_ff @(posedge clk) begin
+        if (current_state_reg == RST && (lut_wen_i || lut_rden_i)) begin
+            lut_addr_reg <= lut_addr_reg + 1;
+        end
     end
 
-    // --- Output Logic (Combinational) ---
+    // FSM Parameter Assignments (from LUT RAM data - combinatorial, based on lut_addr_reg)
     always_comb begin
-        current_state_o = current_state;
-        busy_o = (current_state != IDLE);
-        sequence_done_o = (current_state == EXPOSE_TIME && next_state == IDLE && param_eof_reg == 1'b1);
-        current_repeat_count_o = param_repeat_count_reg;
-        current_data_length_o = param_data_length_reg;
-        current_eof_o = param_eof_reg;
-        current_sof_o = param_sof_reg;
-        case (current_state)
-            IDLE: begin
-            end
-            RST: begin
-            end
-            PANEL_STABLE: begin
-            end
-            BACK_BIAS: begin
-            end
-            FLUSH: begin
-            end
-            EXPOSE_TIME: begin
-            end
-            READOUT: begin
-            end
-            AED_DETECT: begin
-            end
-            default: begin
-                // All outputs default to 0 for unknown states (handled above)
-            end
-        endcase
+        current_sof = lut_read_current_addr_internal[0:0];
+        current_eof = lut_read_current_addr_internal[1:1];
+        current_data_length = lut_read_current_addr_internal[17:2];
+        current_repeat_count = lut_read_current_addr_internal[25:18];
+    end
+
+    // Internal Signal Generation Logic (Simulated for verification)
+    logic [7:0] task_timer;
+    always_ff @(posedge clk or posedge reset_i) begin // Active-High Reset
+        if (reset_i) begin // Reset asserted
+            task_timer <= '0;
+            internal_task_done <= 1'b0;
+            internal_adc_ready <= 1'b0;
+            internal_sensor_stable <= 1'b0;
+            internal_aed_detected <= 1'b0;
+        end else begin
+            internal_task_done <= 1'b0;
+            internal_adc_ready <= 1'b0;
+            internal_sensor_stable <= 1'b0;
+            internal_aed_detected <= 1'b0;
+            case (current_state_reg)
+                RST, BACK_BIAS, FLUSH, EXPOSE_TIME: begin
+                    if (task_timer >= 8'd20) begin
+                        internal_task_done <= 1'b1;
+                        task_timer <= '0;
+                    end else begin
+                        task_timer <= task_timer + 1;
+                    end
+                end
+                PANEL_STABLE: begin
+                    if (task_timer >= 8'd15) begin
+                        internal_sensor_stable <= 1'b1;
+                        task_timer <= '0;
+                    end else begin
+                        task_timer <= task_timer + 1;
+                    end
+                end
+                READOUT: begin
+                    if (task_timer >= 8'd50) begin
+                        internal_task_done <= 1'b1;
+                        internal_adc_ready <= 1'b1;
+                        task_timer <= '0;
+                    else if (task_timer >= 8'd40) begin
+                        internal_adc_ready <= 1'b1;
+                        task_timer <= task_timer + 1;
+                    end else begin
+                        internal_adc_ready <= 1'b0;
+                        task_timer <= task_timer + 1;
+                    end
+                end
+                AED_DETECT: begin
+                    if (task_timer >= 8'd10) begin
+                        internal_aed_detected <= 1'b1;
+                        task_timer <= '0;
+                    end else begin
+                        task_timer <= task_timer + 1;
+                    end
+                end
+                default: task_timer <= '0;
+            endcase
+        end
+    end
+
+    // FSM Outputs Assignments
+    assign current_state_o = current_state_reg;
+    // Busy if not in RST or IDLE. In this model, IDLE is a transient state between commands, so FSM is always 'busy' once sequence starts.
+    assign busy_o = (current_state_reg != RST); 
+    // sequence_done_o is asserted when in IDLE and the command just completed was EOF (current_eof == 1'b1).
+    // It will be asserted for one cycle before looping back to the first command.
+    assign sequence_done_o = (current_state_reg == IDLE && current_eof == 1'b1);
+    assign panel_enable_o = (
+        current_state_reg == PANEL_STABLE
+        || current_state_reg == BACK_BIAS
+        || current_state_reg == FLUSH
+        || current_state_reg == AED_DETECT
+        || current_state_reg == EXPOSE_TIME
+        || current_state_reg == READOUT
+    ) ? 1'b1 : 1'b0;
+    assign bias_enable_o = (
+        current_state_reg == PANEL_STABLE
+        || current_state_reg == BACK_BIAS
+        || current_state_reg == FLUSH
+        || current_state_reg == AED_DETECT
+        || current_state_reg == EXPOSE_TIME
+        || current_state_reg == READOUT
+    ) ? 1'b1 : 1'b0;
+    assign flush_enable_o = (
+        current_state_reg == PANEL_STABLE
+        || current_state_reg == BACK_BIAS
+        || current_state_reg == FLUSH
+        || current_state_reg == AED_DETECT
+        || current_state_reg == EXPOSE_TIME
+        || current_state_reg == READOUT
+    ) ? 1'b1 : 1'b0;
+    assign expose_enable_o = (
+        current_state_reg == PANEL_STABLE
+        || current_state_reg == BACK_BIAS
+        || current_state_reg == FLUSH
+        || current_state_reg == AED_DETECT
+        || current_state_reg == EXPOSE_TIME
+        || current_state_reg == READOUT
+    ) ? 1'b1 : 1'b0;
+    assign readout_enable_o = (
+        current_state_reg == PANEL_STABLE
+        || current_state_reg == BACK_BIAS
+        || current_state_reg == FLUSH
+        || current_state_reg == AED_DETECT
+        || current_state_reg == EXPOSE_TIME
+        || current_state_reg == READOUT
+    ) ? 1'b1 : 1'b0;
+    assign aed_enable_o = (
+        current_state_reg == PANEL_STABLE
+        || current_state_reg == BACK_BIAS
+        || current_state_reg == FLUSH
+        || current_state_reg == AED_DETECT
+        || current_state_reg == EXPOSE_TIME
+        || current_state_reg == READOUT
+    ) ? 1'b1 : 1'b0;
+    assign current_repeat_count_o = current_repeat_count;
+    assign current_data_length_o = current_data_length;
+    assign current_eof_o = current_eof;
+    assign current_sof_o = current_sof;
+
+    // LUT RAM Read/Write Control (Only possible when FSM is in RST state, using auto-incrementing lut_addr_reg)
+    assign lut_read_data_o = lut_ram[lut_addr_reg]; // External read output always reflects lut_addr_reg
+
+    always_ff @(posedge clk) begin
+        if (current_state_reg == RST && lut_wen_i) begin // Only allow write when in RST state and write enable is high
+            lut_ram[lut_addr_reg] <= lut_write_data_i; 
+        end
     end
 
 endmodule

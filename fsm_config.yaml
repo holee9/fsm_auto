@@ -1,5 +1,6 @@
+
 fsm_name: sequencer_fsm
-state_encoding_width: 3 # 2^3 = 8개 상태를 표현 가능 (IDLE, RST, BACK_BIAS 등)
+state_encoding_width: 3
 
 inputs:
   - name: clk
@@ -7,34 +8,25 @@ inputs:
   - name: reset_n
     type: std_logic
   - name: command_id_i
-    type: std_logic_vector(7 downto 0) # LUT RAM 주소로 사용될 8비트 커맨드 ID
+    type: std_logic_vector(7 downto 0)
 
-  - name: task_done_i       # 현재 태스크(BACK_BIAS, FLUSH 등) 완료 신호
+  - name: task_done_i
     type: std_logic
-  - name: adc_ready_i       # ADC가 데이터 읽기 준비 완료 신호
+  - name: adc_ready_i
     type: std_logic
-  - name: sensor_stable_i   # 센서가 안정화되었음을 나타내는 신호
+  - name: sensor_stable_i
     type: std_logic
-  - name: aed_detected_i    # AED(Auto Exposure Detection) 완료 신호
+  - name: aed_detected_i
     type: std_logic
-
-  # LUT RAM 런타임 제어를 위한 입력 (RST 상태에서만 유효)
-  - name: lut_access_en_i
-    type: std_logic          # LUT RAM 접근 활성화 (펄스 시 주소 자동 증가)
-  - name: lut_read_write_mode_i
-    type: std_logic          # 0: 읽기, 1: 쓰기
-  - name: lut_write_data_i
-    type: std_logic_vector(28 downto 0) # LUT RAM에 쓸 데이터 (상태 + 파라미터)
 
 outputs:
   - name: current_state_o
-    type: std_logic_vector(2 downto 0) # 현재 FSM 상태 출력
+    type: std_logic_vector(2 downto 0)
   - name: busy_o
-    type: std_logic                    # FSM이 IDLE이 아닐 때 '1'
+    type: std_logic
   - name: sequence_done_o
-    type: std_logic                    # 전체 시퀀스 완료 (EXPOSE_TIME -> IDLE + eof=1)
+    type: std_logic
 
-  # LUT RAM에서 읽어온 파라미터 레지스터 값 출력
   - name: current_repeat_count_o
     type: std_logic_vector(7 downto 0)
   - name: current_data_length_o
@@ -43,28 +35,18 @@ outputs:
     type: std_logic
   - name: current_sof_o
     type: std_logic
-  
-  # LUT RAM에서 읽은 데이터 출력 (RST 상태에서만 유효)
-  - name: lut_read_data_o
-    type: std_logic_vector(28 downto 0) # LUT RAM에서 읽은 데이터
 
 states:
   - name: IDLE
-    outputs:
-      busy_o: '0'
-      sequence_done_o: '0'
-      current_repeat_count_o: "8'h00"
-      current_data_length_o: "16'h0000"
-      current_eof_o: '0'
-      current_sof_o: '0'
-    transitions: [] # IDLE 상태의 전이는 command_id_i에 의한 LUT RAM 조회로 결정됨
+    outputs: {busy_o: '0', sequence_done_o: '0', current_repeat_count_o: "8'h00", current_data_length_o: "16'h0000", current_eof_o: '0', current_sof_o: '0'}
+    transitions: []
 
-  - name: RST # Reset/Configuration State
+  - name: RST
     outputs: {busy_o: '1', sequence_done_o: '0'}
     transitions:
-      - condition: "task_done_i == '1'" # 외부 태스크 완료 신호로 IDLE 복귀
+      - condition: "task_done_i == '1'"
         next_state: IDLE
-      - condition: "True" # 조건이 없으면 계속 RST 상태 유지
+      - condition: "True"
         next_state: RST
 
   - name: PANEL_STABLE

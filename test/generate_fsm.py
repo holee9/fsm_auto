@@ -1,477 +1,355 @@
 import yaml
 import logging
 import os
+import sys # sys 모듈 추가
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-class FsmSimulator:
-    """
-    Python-based FSM simulator for pre-FPGA verification.
-    Reads FSM structure and LUT RAM data from YAML files.
-    """
-    def __init__(self, fsm_config_path, lut_ram_config_path):
-        with open(fsm_config_path, 'r') as f:
-            self.fsm_config = yaml.safe_load(f)
-        
-        with open(lut_ram_config_path, 'r') as f:
-            self.lut_ram_config = yaml.safe_load(f)
-
-        self.fsm_name = self.fsm_config['fsm_name']
-        self.state_encoding_width = self.fsm_config['state_encoding_width']
-        self.inputs_def = self.fsm_config['inputs']
-        self.outputs_def = self.fsm_config['outputs']
-
-        # Map state names to their objects
-        self.states = {}
-        for s_data in self.fsm_config['states']:
-            self.states[s_data['name']] = {
-                'name': s_data['name'],
-                'outputs': s_data['outputs'],
-                'transitions': s_data.get('transitions', [])
-            }
-        
-        self.current_state_name = 'IDLE' # Initial state
-        
-        # Initialize LUT RAM model (simulated)
-        self.lut_ram_model = self._initialize_lut_ram_model()
-
-        # Initialize current inputs and outputs
-        self.current_inputs = {inp['name']: 0 for inp in self.inputs_def}
-        self.current_outputs = {out['name']: '0' for out in self.outputs_def} # Use string for bit values
-        
-        # Initialize parameter registers (will be updated from LUT RAM)
-        self.current_param_values = {field['name']: 0 for field in self.lut_ram_config['lut_ram_config']['param_fields']}
-
-        # Add internal state for LUT RAM address in simulator (matches Verilog)
-        self.lut_current_addr = 0 
-
-        logging.info(f"FSM Simulator '{self.fsm_name}' initialized. Current state: {self.current_state_name}")
-
-    def _initialize_lut_ram_model(self):
-        """Creates an in-memory representation of the LUT RAM."""
-        addr_width = self.lut_ram_config['lut_ram_config']['address_width']
-        ram_depth = 2**addr_width
-        
-        ram_model = {i: {'next_state': 'IDLE', 'params': {field['name']: 0 for field in self.lut_ram_config['lut_ram_config']['param_fields']}}
-                     for i in range(ram_depth)}
-        
-        for entry in self.lut_ram_config['lut_entries']:
-            addr = entry['address']
-            if addr < ram_depth:
-                params = {field['name']: entry.get(field['name'], 0) for field in self.lut_ram_config['lut_ram_config']['param_fields']}
-                ram_model[addr] = {
-                    'next_state': entry['next_state'],
-                    'params': params
-                }
-            else:
-                logging.warning(f"LUT RAM load: Address {addr} out of bounds (max {ram_depth-1}).")
-        logging.info("FSM LUT RAM model initialized.")
-        return ram_model
-
-    def set_inputs(self, **kwargs):
-        """Set values for FSM inputs."""
-        for key, value in kwargs.items():
-            if key in self.current_inputs:
-                self.current_inputs[key] = value
-            else:
-                logging.warning(f"Input '{key}' not defined in FSM configuration.")
-
-    def _evaluate_condition(self, condition_expr):
-        """Evaluates a condition string against current inputs."""
-        eval_scope = {}
-        for inp_name, inp_val in self.current_inputs.items():
-            # Convert '0'/'1' string to False/True boolean for evaluation
-            if isinstance(inp_val, str) and (inp_val == '0' or inp_val == '1'):
-                eval_scope[inp_name] = (inp_val == '1')
-            else:
-                eval_scope[inp_name] = inp_val
-        
-        try:
-            # Replace '&&' with 'and' for Python evaluation
-            condition_expr_py = condition_expr.replace('&&', 'and').replace('||', 'or')
-            return eval(condition_expr_py, {}, eval_scope)
-        except Exception as e:
-            logging.error(f"Error evaluating condition '{condition_expr}': {e}. Inputs: {self.current_inputs}")
-            return False # Default to false on error
-
-    def step(self):
-        """Simulates one clock cycle of the FSM."""
-        logging.info(f"\n--- FSM Step (Current State: {self.current_state_name}) ---")
-        logging.info(f"Inputs: {self.current_inputs}")
-
-        current_state_data = self.states[self.current_state_name]
-        next_state_name = self.current_state_name # Default next state
-
-        # LUT RAM R/W Logic controlled by RST state
-        if self.current_state_name == "RST":
-            if self.current_inputs.get('lut_access_en_i') == '1':
-                if self.current_inputs.get('lut_read_write_mode_i') == '1': # Write mode
-                    # Extract data from external lut_write_data_i
-                    lut_data_width = self.state_encoding_width + sum(f['width'] for f in self.lut_ram_config['lut_ram_config']['param_fields'])
-                    write_data_int = self.current_inputs.get('lut_write_data_i', 0) # Assumed int for simulation
-                    
-                    next_s_enc_val = write_data_int >> sum(f['width'] for f in self.lut_ram_config['lut_ram_config']['param_fields'])
-                    # Convert encoding back to state name (simple for simulation, can be more robust)
-                    state_names_ordered = [s_data['name'] for s_data in self.fsm_config['states']]
-                    next_state_from_data = "IDLE"
-                    try:
-                        next_state_from_data = state_names_ordered[next_s_enc_val]
-                    except IndexError:
-                        logging.warning(f"Invalid state encoding {next_s_enc_val} in lut_write_data_i. Defaulting to IDLE.")
-
-                    # Extract parameters
-                    params_dict = {}
-                    current_bit_pos = 0
-                    for field in self.lut_ram_config['lut_ram_config']['param_fields']:
-                        mask = (1 << field['width']) - 1
-                        params_dict[field['name']] = (write_data_int >> current_bit_pos) & mask
-                        current_bit_pos += field['width']
-
-                    self.write_lut_ram(self.lut_current_addr, next_state_from_data, params_dict)
-                    logging.info(f"RST State: Writing to LUT RAM at address 0x{self.lut_current_addr:X}")
-                else: # Read mode
-                    read_data = self.read_lut_ram(self.lut_current_addr)
-                    # Output read data (for external interface to consume)
-                    logging.info(f"RST State: Reading from LUT RAM at address 0x{self.lut_current_addr:X} - {read_data}")
-                
-                # Increment address after R/W if access_en is high
-                self.lut_current_addr = (self.lut_current_addr + 1) % (2**self.lut_ram_config['lut_ram_config']['address_width'])
-                logging.info(f"RST State: LUT RAM address incremented to 0x{self.lut_current_addr:X}")
-        
-        # Determine next state logic
-        if self.current_state_name == "IDLE":
-            cmd_id = self.current_inputs.get("command_id_i", 0)
-            if cmd_id in self.lut_ram_model:
-                lut_entry = self.lut_ram_model[cmd_id]
-                next_state_name = lut_entry['next_state']
-                # Update parameter registers when leaving IDLE
-                self.current_param_values = lut_entry['params']
-                logging.info(f"IDLE: LUT RAM lookup for cmd_id={cmd_id} -> Next: {next_state_name}, Params: {self.current_param_values}")
-            else:
-                logging.warning(f"IDLE: Invalid command_id_i {cmd_id}. Staying IDLE.")
-                next_state_name = "IDLE" # Fallback if command ID is not in LUT RAM
-        else:
-            # For non-IDLE states, check transitions defined in fsm_config.yaml
-            transition_found = False
-            for transition in current_state_data['transitions']:
-                condition_expr = transition['condition']
-                if self._evaluate_condition(condition_expr):
-                    next_state_name = transition['next_state']
-                    transition_found = True
-                    logging.info(f"Transition from {self.current_state_name} on condition '{condition_expr}' -> {next_state_name}")
-                    break
-            
-            if not transition_found:
-                logging.info(f"No explicit transition met for state {self.current_state_name}. Defaulting to IDLE.")
-                next_state_name = "IDLE" # Default to IDLE if no other transition is defined or met
-        
-        # Special handling for RST state transition (reset lut_current_addr)
-        if next_state_name == "RST" and self.current_state_name != "RST":
-            self.lut_current_addr = 0 # Reset LUT RAM address when entering RST
-
-        # Update outputs based on current state (Moore-like outputs)
-        self.current_outputs['current_state_o'] = self.get_state_encoding(self.current_state_name)
-        self.current_outputs['busy_o'] = '1' if self.current_state_name != 'IDLE' else '0'
-        
-        self.current_outputs['sequence_done_o'] = '0' 
-        if self.current_state_name == "EXPOSE_TIME" and next_state_name == "IDLE" and self.current_param_values.get('eof') == 1:
-             self.current_outputs['sequence_done_o'] = '1'
-
-        # Set specific outputs for the current state (from fsm_config.yaml)
-        for output_name, output_value in current_state_data['outputs'].items():
-            if output_name in self.current_outputs: # Avoid overwriting hardcoded outputs
-                self.current_outputs[output_name] = output_value
-            else:
-                logging.warning(f"Output '{output_name}' in FSM config is not defined in FSM outputs.")
-
-        # Assign parameter outputs from current_param_values
-        for param_name, param_val in self.current_param_values.items():
-            output_key = f"current_{param_name}_o"
-            if output_key in self.current_outputs:
-                field_width = next(f['width'] for f in self.lut_ram_config['lut_ram_config']['param_fields'] if f['name'] == param_name)
-                if any(out['name'] == output_key and 'std_logic_vector' in out['type'] for out in self.outputs_def):
-                    self.current_outputs[output_key] = f"{field_width}'d{param_val}" # Using decimal string
-                else:
-                    self.current_outputs[output_key] = param_val
-
-        logging.info(f"Outputs: {self.current_outputs}")
-
-        # Transition to next state
-        self.current_state_name = next_state_name
-        logging.info(f"New State: {self.current_state_name}")
-        
-        return self.current_outputs, self.current_state_name
-
-    def get_state_encoding(self, state_name):
-        """Returns the binary encoding string for a given state name."""
-        state_names_ordered = [s_data['name'] for s_data in self.fsm_config['states']]
-        try:
-            idx = state_names_ordered.index(state_name)
-            return bin(idx)[2:].zfill(self.state_encoding_width)
-        except ValueError:
-            logging.error(f"Attempted to encode unknown state: {state_name}")
-            return '?' * self.state_encoding_width # Indicate error
-
-    def write_lut_ram(self, address, next_state_name, params_dict):
-        """Allows runtime update of the simulated LUT RAM."""
-        addr_width = self.lut_ram_config['lut_ram_config']['address_width']
-        ram_depth = 2**addr_width
-        
-        if address < ram_depth:
-            if next_state_name not in self.states:
-                logging.warning(f"Invalid next_state '{next_state_name}' for LUT RAM write. Defaulting to IDLE.")
-                next_state_name = 'IDLE'
-
-            validated_params = {}
-            for field in self.lut_ram_config['lut_ram_config']['param_fields']:
-                validated_params[field['name']] = params_dict.get(field['name'], 0)
-            
-            self.lut_ram_model[address] = {
-                'next_state': next_state_name,
-                'params': validated_params
-            }
-            logging.info(f"SIMULATOR: LUT RAM entry updated at address 0x{address:X}: Next={next_state_name}, Params={validated_params}")
-        else:
-            logging.error(f"SIMULATOR: Attempted to write beyond LUT RAM bounds: Address 0x{address:X}")
-
-    def read_lut_ram(self, address):
-        """Allows runtime read of the simulated LUT RAM."""
-        addr_width = self.lut_ram_config['lut_ram_config']['address_width']
-        ram_depth = 2**addr_width
-        
-        if address < ram_depth:
-            entry = self.lut_ram_model.get(address)
-            logging.info(f"SIMULATOR: LUT RAM read at address 0x{address:X}: {entry}")
-            return entry
-        else:
-            logging.error(f"SIMULATOR: Attempted to read beyond LUT RAM bounds: Address 0x{address:X}")
-            return None
-
-
 def generate_systemverilog_fsm_with_lut_ram(fsm_config_path, lut_ram_config_path, output_file):
     """
-    Generates a SystemVerilog HDL module for the FSM with LUT RAM runtime update.
-    LUT RAM address automatically increments based on lut_access_en_i in RST state.
+    Generates a SystemVerilog FSM module based on LUT RAM.
+    - RST (state) is special for initialization.
+    - FSM starts sequence immediately after reset de-assertion.
+    - LUT RAM read/write in RST state uses auto-incrementing lut_addr_reg.
+    - Each sequence command completion transitions to IDLE.
+    - From IDLE, lut_addr_reg increments, and then transitions to the next command.
+    - Sequence automatically loops back to address 0x00 when 'eof' is detected during IDLE transition.
     """
+    # 파일 존재 여부 확인
+    if not os.path.exists(fsm_config_path):
+        logging.error(f"Error: FSM configuration file not found at {fsm_config_path}")
+        sys.exit(1) # 스크립트 종료
+    if not os.path.exists(lut_ram_config_path):
+        logging.error(f"Error: LUT RAM data file not found at {lut_ram_config_path}")
+        sys.exit(1) # 스크립트 종료
+
     with open(fsm_config_path, 'r') as f:
         fsm_config = yaml.safe_load(f)
-    
     with open(lut_ram_config_path, 'r') as f:
         lut_ram_config = yaml.safe_load(f)
 
     fsm_name = fsm_config['fsm_name']
     state_width = fsm_config['state_encoding_width']
-    inputs = fsm_config['inputs']
-    outputs = fsm_config['outputs']
     states_data = fsm_config['states']
     
-    # LUT RAM configuration
+    # Create a mapping for state names to their encodings
+    state_encoding_map = {state['name']: state['encoding'] for state in states_data}
+    
     lut_address_width = lut_ram_config['lut_ram_config']['address_width']
     param_fields = lut_ram_config['lut_ram_config']['param_fields']
     
-    # Calculate total parameter width and create bit ranges for concatenation
+    # Calculate lut_data_width: state_width + sum of all param_fields widths
     total_param_width = sum(field['width'] for field in param_fields)
-    param_bit_ranges = {} # { 'param_name': (start_bit, end_bit) }
-    current_bit_pos = 0
-    for field in param_fields:
-        param_bit_ranges[field['name']] = (current_bit_pos, current_bit_pos + field['width'] - 1)
-        current_bit_pos += field['width']
+    lut_data_width = state_width + total_param_width 
     
-    lut_data_width = state_width + total_param_width # Total width of data stored in LUT RAM entry
+    inputs = fsm_config['inputs']
+    outputs = fsm_config['outputs']
 
-    # Map state names to their binary encodings
-    state_encoding = {}
-    for i, state_data in enumerate(states_data):
-        state_name = state_data['name']
-        state_encoding[state_name] = f"{state_width}'b{bin(i)[2:].zfill(state_width)}"
-
-    verilog_code = []
-    verilog_code.append(f"module {fsm_name} (")
+    input_ports = []
+    # Always include clk and reset_i
+    input_ports.append(f"    input logic clk") 
+    input_ports.append(f"    input logic reset_i") 
     
-    # Port declarations
-    port_declarations = []
-    for p in inputs:
-        if 'std_logic_vector' in p['type']:
-            width = p['type'].replace('std_logic_vector(', '').replace(')', '')
-            port_declarations.append(f"    input logic {width} {p['name']}")
+    # Add LUT RAM specific inputs (fixed width after calculation)
+    input_ports.append(f"    input logic lut_wen_i; // LUT Write Enable (active high, only in RST state)")
+    input_ports.append(f"    input logic [{lut_data_width-1}:0] lut_write_data_i; // Data to write to LUT RAM")
+    input_ports.append(f"    input logic lut_rden_i; // LUT Read Enable (active high, only in RST state)") 
+
+    # List of signals that should be internal for simulation purposes, not external inputs
+    internal_sim_signals = [
+        'internal_task_done', 
+        'internal_adc_ready', 
+        'internal_sensor_stable', 
+        'internal_aed_detected'
+    ]
+
+    # Other non-control inputs from fsm_config.yaml, excluding those listed in internal_sim_signals
+    for inp in inputs:
+        # Skip control signals already handled or removed, AND signals defined as internal for simulation
+        if inp['name'] in ['clk', 'reset_i', 'lut_wen_i', 'lut_write_data_i', 'lut_rden_i'] or \
+           inp['name'] in internal_sim_signals: 
+            continue 
+        elif inp['width'] == 1:
+            input_ports.append(f"    input logic {inp['name']}")
         else:
-            port_declarations.append(f"    input logic {p['name']}")
-    for p in outputs:
-        if 'std_logic_vector' in p['type']:
-            width = p['type'].replace('std_logic_vector(', '').replace(')', '')
-            port_declarations.append(f"    output logic {width} {p['name']}")
+            input_ports.append(f"    input logic [{inp['width']-1}:0] {inp['name']}")
+
+    output_ports = []
+    # Add LUT RAM specific output (fixed width after calculation)
+    output_ports.append(f"    output logic [{lut_data_width-1}:0] lut_read_data_o; // Data read from LUT RAM") 
+
+    for out in outputs:
+        # Skip output already handled
+        if out['name'] == 'lut_read_data_o':
+            continue 
+        elif out['width'] == 1:
+            output_ports.append(f"    output logic {out['name']}")
         else:
-            port_declarations.append(f"    output logic {p['name']}")
-    
-    # Add simplified LUT RAM R/W interface ports
-    port_declarations.append(f"    input  logic                               lut_access_en_i,    // LUT RAM Access Enable (1 pulse per read/write cycle)")
-    port_declarations.append(f"    input  logic                               lut_read_write_mode_i, // 0: Read, 1: Write")
-    port_declarations.append(f"    input  logic [{lut_data_width}-1:0]        lut_write_data_i,   // Data to write to LUT RAM")
-    port_declarations.append(f"    output logic [{lut_data_width}-1:0]        lut_read_data_o     // Data read from LUT RAM")
+            output_ports.append(f"    output logic [{out['width']-1}:0] {out['name']}")
 
+    sv_code = []
+    sv_code.append(f"`timescale 1ns / 1ps")
+    sv_code.append(f"")
+    sv_code.append(f"module {fsm_name} (")
+    sv_code.append(",\n".join(input_ports + output_ports))
+    sv_code.append(");")
+    sv_code.append("")
 
-    verilog_code.append(",\n".join(port_declarations))
-    verilog_code.append(");\n")
+    # Localparams for states
+    for state_name, encoding in state_encoding_map.items():
+        sv_code.append(f"    localparam {state_name} = {state_width}'d{encoding};")
+    sv_code.append("")
 
-    verilog_code.append(f"    // --- State Encoding Parameters ---")
-    for state_name, encoding in state_encoding.items():
-        verilog_code.append(f"    localparam {state_name} = {encoding};")
-    verilog_code.append("\n")
+    sv_code.append(f"    logic [{state_width-1}:0] current_state_reg;")
+    sv_code.append("")
 
-    verilog_code.append(f"    // --- FSM State Registers ---")
-    verilog_code.append(f"    logic [{state_width-1}:0] current_state;")
-    verilog_code.append(f"    logic [{state_width-1}:0] next_state;\n")
-    
-    verilog_code.append(f"    // --- Parameter Registers (updated from LUT RAM) ---")
-    verilog_code.append(f"    logic [{total_param_width-1}:0] current_param_combined_reg; // Holds combined parameter value")
-    # Individual parameter registers
+    sv_code.append(f"    // LUT Address Register. This points to the current LUT entry being processed.")
+    sv_code.append(f"    logic [{lut_address_width-1}:0] lut_addr_reg; ")
+    sv_code.append(f"    // Simulated internal task completion signals - These are for simulation purposes only, not external inputs.")
+    sv_code.append(f"    logic internal_task_done;")
+    sv_code.append(f"    logic internal_adc_ready;")
+    sv_code.append(f"    logic internal_sensor_stable;")
+    sv_code.append(f"    logic internal_aed_detected;")
+    sv_code.append(f"")
+
+    # Extract parameter field widths for parsing LUT data
+    eof_field = next((field for field in param_fields if field['name'] == 'eof'), None)
+    if not eof_field:
+        raise ValueError("fsm_lut_ram_data.yaml must define an 'eof' field in 'param_fields'.")
+    eof_width = eof_field['width']
+
+    # Define current_ parameters based on fields in LUT RAM
     for field in param_fields:
-        verilog_code.append(f"    logic [{field['width']-1}:0] param_{field['name']}_reg;")
-    verilog_code.append("\n")
+        sv_code.append(f"    logic [{field['width']-1}:0] current_{field['name']};")
+    sv_code.append(f"")
 
-    # --- LUT RAM Implementation ---
-    verilog_code.append(f"    // --- FSM LUT RAM (Behavioral Model - will be synthesized to BRAM/LUT-RAM) ---")
-    verilog_code.append(f"    // Each entry stores: {{next_state_encoding, combined_param_value}}")
-    verilog_code.append(f"    localparam int LUT_RAM_DEPTH = {2**lut_address_width};")
-    verilog_code.append(f"    logic [{lut_data_width-1}:0] lut_ram [LUT_RAM_DEPTH-1:0];\n")
+    sv_code.append(f"    // LUT RAM Declaration")
+    sv_code.append(f"    logic [{lut_data_width-1}:0] lut_ram [0:{(2**lut_address_width)-1}];")
+    sv_code.append(f"")
     
-    verilog_code.append(f"    // --- LUT RAM Address and Control Registers ---")
-    verilog_code.append(f"    logic [{lut_address_width}-1:0] lut_current_addr_reg; // Current address for LUT RAM R/W")
-    verilog_code.append(f"    logic                               lut_internal_active;  // True when LUT RAM access is permitted/active\n")
-
-    verilog_code.append(f"    // LUT RAM access is only enabled when FSM is in RST state AND external access_en is high")
-    verilog_code.append(f"    assign lut_internal_active = (current_state == RST) && lut_access_en_i;\n")
+    sv_code.append(f"    // LUT data for current address (combinatorial read for FSM internal use)")
+    sv_code.append(f"    logic [{lut_data_width-1}:0] lut_read_current_addr_internal;")
+    sv_code.append(f"    assign lut_read_current_addr_internal = lut_ram[lut_addr_reg]; ")
+    sv_code.append(f"")
     
-    verilog_code.append(f"    // LUT RAM Read Data Output: always reading from lut_current_addr_reg when internal_active, else '0")
-    verilog_code.append(f"    assign lut_read_data_o = lut_internal_active && !lut_read_write_mode_i ? lut_ram[lut_current_addr_reg] : '0; \n")
+    # Calculate bit positions for state and parameters within the LUT entry
+    # next_state is at the MSB side
+    next_state_start_bit = total_param_width
+    sv_code.append(f"    logic [{state_width-1}:0] next_state_from_lut;")
+    sv_code.append(f"    assign next_state_from_lut = lut_read_current_addr_internal[{next_state_start_bit+state_width-1}:{next_state_start_bit}];")
+    sv_code.append(f"")
 
-
-    verilog_code.append(f"    // --- Synchronous Logic (State, Parameters, and LUT RAM R/W) ---")
-    verilog_code.append(f"    always_ff @(posedge clk or negedge reset_n) begin")
-    verilog_code.append(f"        if (!reset_n) begin")
-    verilog_code.append(f"            current_state <= IDLE;")
-    verilog_code.append(f"            current_param_combined_reg <= '0;")
-    for field in param_fields:
-        verilog_code.append(f"            param_{field['name']}_reg <= '0;")
+    # FSM State Register and lut_addr_reg management
+    sv_code.append(f"    // FSM State Register and LUT Address Management")
+    sv_code.append(f"    always_ff @(posedge clk or posedge reset_i) begin // Active-High Reset")
+    sv_code.append(f"        if (reset_i) begin // Reset asserted (active high)")
+    sv_code.append(f"            current_state_reg <= RST; // Go to RST state on reset assertion")
+    sv_code.append(f"            lut_addr_reg <= {lut_address_width}'h00; // Initialize LUT address for RAM config")
+    sv_code.append(f"        end else begin")
+    sv_code.append(f"            case (current_state_reg)")
+    sv_code.append(f"                RST: begin")
+    sv_code.append(f"                    // Reset de-asserted: transition to the first sequence state (from LUT[0x00])")
+    sv_code.append(f"                    current_state_reg <= lut_ram[{lut_address_width}'h00][{next_state_start_bit+state_width-1}:{next_state_start_bit}]; ")
+    sv_code.append(f"                    lut_addr_reg <= {lut_address_width}'h00; // Reset address for sequence execution")
+    sv_code.append(f"                end")
+    sv_code.append(f"                IDLE: begin")
+    sv_code.append(f"                    // In IDLE, increment lut_addr_reg and determine next state")
+    sv_code.append(f"                    if (current_eof) begin // If the *current* command (that just completed) was EOF")
+    sv_code.append(f"                        lut_addr_reg <= {lut_address_width}'h00; // Loop back to start of sequence")
+    sv_code.append(f"                        current_state_reg <= lut_ram[{lut_address_width}'h00][{next_state_start_bit+state_width-1}:{next_state_start_bit}]; // Go to state from LUT[0x00]")
+    sv_code.append(f"                    end else begin")
+    sv_code.append(f"                        lut_addr_reg <= lut_addr_reg + 1; // Increment for the next command")
+    sv_code.append(f"                        // In the next cycle, lut_addr_reg will be updated, so current_state_reg will then read lut_ram[new_lut_addr_reg]")
+    sv_code.append(f"                        current_state_reg <= lut_ram[lut_addr_reg + 1][{next_state_start_bit+state_width-1}:{next_state_start_bit}]; // Go to next state from LUT for (current lut_addr_reg + 1)")
+    sv_code.append(f"                    end")
+    sv_code.append(f"                end") 
     
-    # Reset/Initialise LUT RAM content to default values
-    verilog_code.append(f"            lut_current_addr_reg <= '0;") # Reset LUT RAM address
-    verilog_code.append(f"            for (int i = 0; i < LUT_RAM_DEPTH; i++) begin")
-    default_param_values_str = "{" + ", ".join([f"{field['width']}'d0" for field in param_fields]) + "}"
-    verilog_code.append(f"                lut_ram[i] <= {{IDLE, {default_param_values_str}}};")
-    verilog_code.append(f"            end")
-
-    verilog_code.append(f"        end else begin")
-    verilog_code.append(f"            // FSM State Update")
-    verilog_code.append(f"            current_state <= next_state;")
-
-    verilog_code.append(f"            // LUT RAM Address Increment and Write Logic")
-    verilog_code.append(f"            if (lut_internal_active) begin")
-    verilog_code.append(f"                if (lut_read_write_mode_i) begin // Write mode")
-    verilog_code.append(f"                    lut_ram[lut_current_addr_reg] <= lut_write_data_i;")
-    verilog_code.append(f"                end")
-    verilog_code.append(f"                // Increment address after R/W, wrapping around")
-    verilog_code.append(f"                lut_current_addr_reg <= lut_current_addr_reg + 1;")
-    verilog_code.append(f"            end else if (next_state == RST && current_state != RST) begin")
-    verilog_code.append(f"                // Reset LUT RAM address when entering RST state")
-    verilog_code.append(f"                lut_current_addr_reg <= '0;")
-    verilog_code.append(f"            end")
-    
-    verilog_code.append(f"            // FSM Parameter Registers Update")
-    verilog_code.append(f"            if (current_state == IDLE) begin // Update parameters when transitioning FROM IDLE")
-    verilog_code.append(f"                current_param_combined_reg <= lut_param_read;")
-    for field in param_fields:
-        start_bit, end_bit = param_bit_ranges[field['name']]
-        verilog_code.append(f"                param_{field['name']}_reg <= lut_param_read[{end_bit}:{start_bit}];")
-    verilog_code.append(f"            end")
-    verilog_code.append(f"        end")
-    verilog_code.append(f"    end\n")
-
-    # Read from RAM based on command_id_i (always available for IDLE state transitions)
-    verilog_code.append(f"    logic [{state_width-1}:0] lut_next_state_read; ")
-    verilog_code.append(f"    logic [{total_param_width-1}:0] lut_param_read; ")
-    verilog_code.append(f"    assign {{lut_next_state_read, lut_param_read}} = lut_ram[command_id_i];\n")
-
-    verilog_code.append(f"    // --- Next State Logic (Combinational) ---")
-    verilog_code.append(f"    always_comb begin")
-    verilog_code.append(f"        next_state = current_state; // Default to current state (safety)")
-    verilog_code.append(f"        case (current_state)")
-    
+    # All non-RST, non-IDLE states transition to IDLE upon task completion
     for state in states_data:
         state_name = state['name']
-        verilog_code.append(f"            {state_name}: begin")
-        
-        if state_name == "IDLE":
-            verilog_code.append(f"                next_state = lut_next_state_read; // Determined by LUT RAM lookup")
-        else:
-            explicit_idle_transition_found = False
-            for transition in state['transitions']:
-                condition = transition['condition']
-                next_s = transition['next_state']
-                if next_s == "IDLE":
-                    explicit_idle_transition_found = True
-                verilog_code.append(f"                if ({condition}) begin")
-                verilog_code.append(f"                    next_state = {next_s};")
-                verilog_code.append(f"                end")
+        if state_name != "RST" and state_name != "IDLE": 
+            completion_signal = ""
+            if state_name == "PANEL_STABLE": completion_signal = "internal_sensor_stable"
+            elif state_name == "BACK_BIAS": completion_signal = "internal_task_done"
+            elif state_name == "FLUSH": completion_signal = "internal_task_done"
+            elif state_name == "EXPOSE_TIME": completion_signal = "internal_task_done"
+            elif state_name == "READOUT": completion_signal = "(internal_task_done && internal_adc_ready)"
+            elif state_name == "AED_DETECT": completion_signal = "internal_aed_detected" 
             
-            if not explicit_idle_transition_found:
-                 verilog_code.append(f"                // Default: Go to IDLE (Task Completion)")
-                 verilog_code.append(f"                next_state = IDLE;")
+            if completion_signal:
+                sv_code.append(f"                {state_name}: begin")
+                sv_code.append(f"                    if ({completion_signal}) begin")
+                sv_code.append(f"                        current_state_reg <= IDLE; // Task done, go to IDLE to update address and transition")
+                sv_code.append(f"                    end else begin")
+                sv_code.append(f"                        current_state_reg <= {state_name}; // Stay in current state")
+                sv_code.append(f"                    end")
+                # lut_addr_reg stays the same until IDLE state processes it
+                sv_code.append(f"                    lut_addr_reg <= lut_addr_reg; ") 
+                sv_code.append(f"                end")
+    sv_code.append(f"                default: begin")
+    sv_code.append(f"                    current_state_reg <= RST; // Fallback to RST on unexpected state")
+    sv_code.append(f"                    lut_addr_reg <= {lut_address_width}'h00;") 
+    sv_code.append(f"                end")
+    sv_code.append(f"            endcase")
+    sv_code.append(f"        end")
+    sv_code.append(f"    end")
+    sv_code.append("")
 
-        verilog_code.append(f"            end")
+    # Separate always_ff block for lut_addr_reg increment during RST
+    sv_code.append(f"    // lut_addr_reg auto-increment in RST state for LUT RAM configuration")
+    sv_code.append(f"    always_ff @(posedge clk) begin")
+    sv_code.append(f"        if (current_state_reg == RST && (lut_wen_i || lut_rden_i)) begin")
+    sv_code.append(f"            lut_addr_reg <= lut_addr_reg + 1;")
+    sv_code.append(f"        end")
+    sv_code.append(f"    end")
+    sv_code.append("")
+
+    sv_code.append(f"    // FSM Parameter Assignments (from LUT RAM data - combinatorial, based on lut_addr_reg)")
+    sv_code.append(f"    always_comb begin")
+    current_bit_pos = 0
+    # Assign actual parameters including 'eof' and 'sof'
+    for field in reversed(param_fields): # Iterate in reverse to correctly build from LSB (assuming param_fields are LSB to MSB)
+        sv_code.append(f"        current_{field['name']} = lut_read_current_addr_internal[{current_bit_pos + field['width']-1}:{current_bit_pos}];")
+        current_bit_pos += field['width']
+    sv_code.append(f"    end")
+    sv_code.append(f"")
     
-    verilog_code.append(f"            default: begin")
-    verilog_code.append(f"                next_state = IDLE; // Fallback for unknown states")
-    verilog_code.append(f"            end")
-
-    verilog_code.append(f"        endcase")
-    verilog_code.append(f"    end\n")
-
-    verilog_code.append(f"    // --- Output Logic (Combinational) ---")
-    verilog_code.append(f"    always_comb begin")
+    # --- Internal Signal Generation (Simulated for verification) ---
+    # This block simulates task completion signals, not part of the FSM itself.
+    sv_code.append(f"    // Internal Signal Generation Logic (Simulated for verification)")
+    sv_code.append(f"    logic [7:0] task_timer;")
+    sv_code.append(f"    always_ff @(posedge clk or posedge reset_i) begin // Active-High Reset")
+    sv_code.append(f"        if (reset_i) begin // Reset asserted")
+    sv_code.append(f"            task_timer <= '0;")
+    sv_code.append(f"            internal_task_done <= 1'b0;")
+    sv_code.append(f"            internal_adc_ready <= 1'b0;")
+    sv_code.append(f"            internal_sensor_stable <= 1'b0;")
+    sv_code.append(f"            internal_aed_detected <= 1'b0;")
+    sv_code.append(f"        end else begin")
+    sv_code.append(f"            internal_task_done <= 1'b0;") 
+    sv_code.append(f"            internal_adc_ready <= 1'b0;")
+    sv_code.append(f"            internal_sensor_stable <= 1'b0;")
+    sv_code.append(f"            internal_aed_detected <= 1'b0;")
     
-    # Default outputs
-    for out_port in outputs:
-        if out_port['name'] == 'current_state_o':
-            verilog_code.append(f"        {out_port['name']} = current_state;")
-        elif out_port['name'] == 'busy_o':
-            verilog_code.append(f"        {out_port['name']} = (current_state != IDLE);")
-        elif out_port['name'] == 'sequence_done_o':
-            verilog_code.append(f"        {out_port['name']} = (current_state == EXPOSE_TIME && next_state == IDLE && param_eof_reg == 1'b1);")
-        elif out_port['name'].startswith('current_') and out_port['name'].endswith('_o'):
-            param_name = out_port['name'].replace('current_', '').replace('_o', '')
-            verilog_code.append(f"        {out_port['name']} = param_{param_name}_reg;")
+    sv_code.append(f"            case (current_state_reg)")
+    sv_code.append(f"                RST, BACK_BIAS, FLUSH, EXPOSE_TIME: begin") 
+    sv_code.append(f"                    if (task_timer >= 8'd20) begin")
+    sv_code.append(f"                        internal_task_done <= 1'b1;")
+    sv_code.append(f"                        task_timer <= '0;")
+    sv_code.append(f"                    end else begin")
+    sv_code.append(f"                        task_timer <= task_timer + 1;")
+    sv_code.append(f"                    end")
+    sv_code.append(f"                end")
+    sv_code.append(f"                PANEL_STABLE: begin")
+    sv_code.append(f"                    if (task_timer >= 8'd15) begin")
+    sv_code.append(f"                        internal_sensor_stable <= 1'b1;")
+    sv_code.append(f"                        task_timer <= '0;")
+    sv_code.append(f"                    end else begin")
+    sv_code.append(f"                        task_timer <= task_timer + 1;")
+    sv_code.append(f"                    end")
+    sv_code.append(f"                end")
+    sv_code.append(f"                READOUT: begin")
+    sv_code.append(f"                    if (task_timer >= 8'd50) begin")
+    sv_code.append(f"                        internal_task_done <= 1'b1;")
+    sv_code.append(f"                        internal_adc_ready <= 1'b1;") # ADC ready signal might be needed for READOUT
+    sv_code.append(f"                        task_timer <= '0;")
+    sv_code.append(f"                    else if (task_timer >= 8'd40) begin") # Example: ADC is ready 10 cycles before task done
+    sv_code.append(f"                        internal_adc_ready <= 1'b1;")
+    sv_code.append(f"                        task_timer <= task_timer + 1;")
+    sv_code.append(f"                    end else begin")
+    sv_code.append(f"                        internal_adc_ready <= 1'b0;")
+    sv_code.append(f"                        task_timer <= task_timer + 1;")
+    sv_code.append(f"                    end")
+    sv_code.append(f"                end")
+    sv_code.append(f"                AED_DETECT: begin") # Still kept in fsm_config but not in this sequence, timer will reset if FSM somehow hits this.
+    sv_code.append(f"                    if (task_timer >= 8'd10) begin")
+    sv_code.append(f"                        internal_aed_detected <= 1'b1;")
+    sv_code.append(f"                        task_timer <= '0;")
+    sv_code.append(f"                    end else begin")
+    sv_code.append(f"                        task_timer <= task_timer + 1;")
+    sv_code.append(f"                    end")
+    sv_code.append(f"                end")
+    sv_code.append(f"                default: task_timer <= '0;") # IDLE will also reset timer, or keep it low
+    sv_code.append(f"            endcase")
+    sv_code.append(f"        end")
+    sv_code.append(f"    end")
+    sv_code.append(f"")
+    
+    # FSM Outputs
+    sv_code.append(f"    // FSM Outputs Assignments")
+    sv_code.append(f"    assign current_state_o = current_state_reg;")
+    sv_code.append(f"    // Busy if not in RST or IDLE. In this model, IDLE is a transient state between commands, so FSM is always 'busy' once sequence starts.")
+    sv_code.append(f"    assign busy_o = (current_state_reg != RST); ") 
+    
+    # sequence_done_o assertion logic: asserted when in IDLE and the command just completed was EOF
+    sv_code.append(f"    // sequence_done_o is asserted when in IDLE and the command just completed was EOF (current_eof == 1'b1).")
+    sv_code.append(f"    // It will be asserted for one cycle before looping back to the first command.")
+    sv_code.append(f"    assign sequence_done_o = (current_state_reg == IDLE && current_eof == 1'b1);") 
+
+    # Outputs for FSM specific control (derived from `fsm_config.yaml` outputs)
+    for out in fsm_config['outputs']:
+        if out['name'] in ['current_state_o', 'busy_o', 'sequence_done_o', 'lut_read_data_o'] or out['name'].startswith('current_'):
+            continue # These are handled separately
+
+        # Find the state where this output is defined and its value
+        # This assumes outputs are directly mapped from current_state_reg and are mutually exclusive
+        output_cases = []
+        for state in states_data:
+            if 'outputs' in state and out['name'] in state['outputs']:
+                output_cases.append(f"                {state['name']}: {state['outputs'][out['name']]}'b1;")
+        
+        if output_cases:
+            sv_code.append(f"    assign {out['name']} = (")
+            sv_code.append(f"        current_state_reg == {output_cases[0].split(':')[0].strip()}")
+            for i in range(1, len(output_cases)):
+                 sv_code.append(f"        || current_state_reg == {output_cases[i].split(':')[0].strip()}")
+            sv_code.append(f"    ) ? 1'b1 : 1'b0;")
         else:
-            if 'std_logic_vector' in out_port['type']:
-                verilog_code.append(f"        {out_port['name']} = '0; // Default to all zeros")
-            else:
-                verilog_code.append(f"        {out_port['name']} = '0;")
+            sv_code.append(f"    assign {out['name']} = 1'b0;") # Default to 0 if not explicitly defined in any state
     
-    verilog_code.append(f"        case (current_state)")
-    for state in states_data:
-        state_name = state['name']
-        verilog_code.append(f"            {state_name}: begin")
-        for output_name, output_value in state['outputs'].items():
-            if output_name not in ['current_state_o', 'busy_o', 'sequence_done_o'] and \
-               not (output_name.startswith('current_') and output_name.endswith('_o')):
-                verilog_code.append(f"                {output_name} = {output_value};")
-        verilog_code.append(f"            end")
-    verilog_code.append(f"            default: begin")
-    verilog_code.append(f"                // All outputs default to 0 for unknown states (handled above)")
-    verilog_code.append(f"            end")
-    verilog_code.append(f"        endcase")
-    verilog_code.append(f"    end\n")
+    # Outputs for current LUT parameters
+    for field in param_fields:
+        sv_code.append(f"    assign current_{field['name']}_o = current_{field['name']};")
+    sv_code.append(f"")
 
-    verilog_code.append(f"endmodule")
+    # LUT RAM Read/Write Control (Only possible when FSM is in RST state, using auto-incrementing lut_addr_reg)
+    sv_code.append(f"    // LUT RAM Read/Write Control (Only possible when FSM is in RST state, using auto-incrementing lut_addr_reg)")
+    sv_code.append(f"    assign lut_read_data_o = lut_ram[lut_addr_reg]; // External read output always reflects lut_addr_reg")
+    sv_code.append(f"")
+    sv_code.append(f"    always_ff @(posedge clk) begin")
+    sv_code.append(f"        if (current_state_reg == RST && lut_wen_i) begin // Only allow write when in RST state and write enable is high")
+    sv_code.append(f"            lut_ram[lut_addr_reg] <= lut_write_data_i; ") 
+    sv_code.append(f"        end")
+    sv_code.append(f"    end")
+    sv_code.append("")
+    
+    sv_code.append(f"endmodule")
 
     with open(output_file, 'w') as f:
-        f.write("\n".join(verilog_code))
+        f.write("\n".join(sv_code))
+    logging.info(f"SystemVerilog FSM module generated successfully: {output_file}")
 
 
+# --- Mermaid Diagram Generation (modified) ---
 def generate_mermaid_fsm_diagram(fsm_config_path, lut_ram_config_path, output_file):
     """
     Generates a Mermaid State Diagram markdown string from FSM configuration.
+    Reflects the active-high reset, special RST/IDLE states, and LUT-driven transitions
+    using lut_addr_reg increment and 'eof' flag.
+    - FSM starts sequence immediately after reset de-assertion.
+    - LUT RAM read/write in RST state uses auto-incrementing lut_addr_reg.
+    - Each command completion transitions to IDLE.
+    - From IDLE, lut_addr_reg increments and then transitions to the next command.
+    - Sequence automatically loops back to address 0x00 when 'eof' is detected during IDLE transition.
     """
+    # 파일 존재 여부 확인
+    if not os.path.exists(fsm_config_path):
+        logging.error(f"Error: FSM configuration file not found at {fsm_config_path}")
+        sys.exit(1) # 스크립트 종료
+    if not os.path.exists(lut_ram_config_path):
+        logging.error(f"Error: LUT RAM data file not found at {lut_ram_config_path}")
+        sys.exit(1) # 스크립트 종료
+
     with open(fsm_config_path, 'r') as f:
         fsm_config = yaml.safe_load(f)
     with open(lut_ram_config_path, 'r') as f:
@@ -479,20 +357,22 @@ def generate_mermaid_fsm_diagram(fsm_config_path, lut_ram_config_path, output_fi
 
     fsm_name = fsm_config['fsm_name']
     states_data = fsm_config['states']
+    lut_entries = lut_ram_config['lut_entries']
+    
+    state_encoding_map = {state['name']: state['encoding'] for state in states_data}
     
     mermaid_lines = []
     mermaid_lines.append("```mermaid")
     mermaid_lines.append(f"stateDiagram-v2")
-    mermaid_lines.append(f"    direction LR") # Left to Right diagram direction
+    mermaid_lines.append(f"    direction LR")
 
-    # Define states
     for state in states_data:
         state_name = state['name']
         output_desc = []
-        # .get()을 사용하여 'outputs' 키가 없을 경우를 대비합니다.
+        # Filter out auto-generated outputs and 'current_' prefix outputs for cleaner diagram
         for out_name, out_val in state.get('outputs', {}).items():
-            if out_name not in ['current_state_o', 'busy_o', 'sequence_done_o'] and \
-               not out_name.startswith('current_') and not out_name.endswith('_o'):
+            if out_name not in ['current_state_o', 'busy_o', 'sequence_done_o', 'lut_read_data_o'] and \
+               not out_name.startswith('current_'):
                 output_desc.append(f"{out_name}={out_val}")
         
         if output_desc:
@@ -502,54 +382,53 @@ def generate_mermaid_fsm_diagram(fsm_config_path, lut_ram_config_path, output_fi
 
     mermaid_lines.append("\n")
 
-    # Define initial state
-    mermaid_lines.append(f"    [*] --> IDLE")
+    # Initial Reset Sequence
+    mermaid_lines.append(f"    [*] --> RST : Reset asserted (reset_i = 1) / lut_addr_reg <= 0x00")
+    mermaid_lines.append(f"    RST --> {lut_entries[0]['next_state']} : Reset de-asserted (reset_i = 0 falling edge) / lut_addr_reg <= 0x00 (re-init for seq)")
+    mermaid_lines.append(f"    RST : LUT RAM R/W enabled (using auto-incrementing lut_addr_reg with lut_wen_i/lut_rden_i)")
 
-    # Define transitions
-    for state in states_data:
-        state_name = state['name']
-        
-        if state_name == "IDLE":
-            mermaid_lines.append(f"    IDLE --> State_from_LUT : command_id_i (LUT Lookup)")
-            mermaid_lines.append(f"    state State_from_LUT <<choice>>")
-            
-            next_states_from_lut = set(entry['next_state'] for entry in lut_ram_config['lut_entries'])
-            
-            for next_s in sorted(list(next_states_from_lut)):
-                # LUT에서 전이될 수 있는 각 상태에 대해 command_id_i를 조건으로 명시
-                # 실제 command_id_i 값 대신 상태 이름을 조건으로 사용하는 것이 다이어그램에서 더 직관적입니다.
-                mermaid_lines.append(f"    State_from_LUT --> {next_s} : command_id_i == \"{next_s}\"")
-            
-        else:
-            has_explicit_transition_to_self = False # 'True' 조건으로 자기 자신에게 가는 전이 여부 확인
-            explicit_transitions = []
-            for transition in state['transitions']:
-                condition = transition['condition'].replace('&&', ' and ').replace('||', ' or ').replace("'", "")
-                next_s = transition['next_state']
-                
-                explicit_transitions.append(f"    {state_name} --> {next_s} : {condition}")
-                
-                if condition == "True" and next_s == state_name:
-                    has_explicit_transition_to_self = True
+    # All sequence states transition to IDLE upon task completion
+    for entry in lut_entries:
+        current_state_for_cmd = entry['next_state']
+        if current_state_for_cmd not in ["RST", "IDLE"]: # RST and IDLE are handled separately
+            mermaid_lines.append(f"    {current_state_for_cmd} --> IDLE : Task Done")
 
-            # 명시적 전이를 먼저 추가합니다.
-            mermaid_lines.extend(explicit_transitions)
-
-            # 'else' 전이 추가 로직 (기존 FSM의 동작 방식과 Mermaid의 'else' 문법을 고려)
-            # 조건이 명시적으로 'True'가 아니면서 자기 자신에게 가는 전이가 없다면 'else'를 추가
-            if not has_explicit_transition_to_self:
-                # FSM 시뮬레이터와 Verilog 생성 코드는 명시된 전이가 없으면 기본적으로 IDLE로 갑니다.
-                # 하지만, 수정된 Mermaid 코드에서는 'else'일 때 자기 자신에게 머무는 것으로 표현되어 있습니다.
-                # Mermaid 다이어그램의 의도를 반영하기 위해 'else'는 자기 자신에게 머무는 것으로 합니다.
-                # 만약 IDLE로 가야 한다면, 해당 상태의 YAML에 'True' 조건으로 IDLE 전이를 명시하는 것이 좋습니다.
-                mermaid_lines.append(f"    {state_name} --> {state_name} : else")
+    # IDLE state transitions based on EOF
+    # IDLE state has two possible transitions based on the 'eof' bit of the *current* lut_addr_reg after increment
+    mermaid_lines.append(f"    IDLE --> State_Evaluation_in_IDLE : lut_addr_reg increments (+1)")
     
-    # Updated note block position and content formatting
+    # Transition for EOF = 1
+    # This refers to the next state after the increment.
+    # The 'eof' bit is from the *current* command (before increment in Verilog, but after the state transition logic)
+    # The mermaid needs to represent the logic: if lut_ram[old_addr].eof == 1, then new_addr = 0x00.
+    # If lut_ram[old_addr].eof == 0, then new_addr = old_addr + 1.
+    
+    mermaid_lines.append(f"    State_Evaluation_in_IDLE --> {lut_entries[0]['next_state']} : if current_eof == 1 / lut_addr_reg <= 0x00 (loop)")
+    
+    # Transition for EOF = 0
+    # Iterate through all entries to find the *next* state if EOF was 0
+    for i in range(len(lut_entries)):
+        current_entry = lut_entries[i]
+        if current_entry['eof'] == 0: # If this command is NOT the end of sequence
+            next_addr_in_sequence = current_entry['address'] + 1
+            next_state_obj = next((e for e in lut_entries if e['address'] == next_addr_in_sequence), None)
+            
+            if next_state_obj:
+                mermaid_lines.append(f"    State_Evaluation_in_IDLE --> {next_state_obj['next_state']} : if current_eof == 0 (for command at {hex(current_entry['address'])})")
+            # else: If no next_state_obj, it's an undefined path, handled by default below
+
+    # Default fallback to RST (e.g., if FSM enters an unexpected state)
+    mermaid_lines.append(f"    default --> RST : Unexpected state / lut_addr_reg <= 0x00")
+
     mermaid_lines.append("\n    note right of RST")
-    mermaid_lines.append("        LUT RAM Read/Write Mode:")
-    mermaid_lines.append("        - Address auto-increments with each access.")
-    mermaid_lines.append("        - lut_read_write_mode_i: 0=Read, 1=Write")
-    mermaid_lines.append("        - lut_access_en_i triggers access & increment.")
+    mermaid_lines.append("        - **Reset (Active High)**: When `reset_i=1`, FSM enters `RST` state. `lut_addr_reg` initializes to `0x00`.")
+    mermaid_lines.append("        - **LUT RAM Configuration (in RST)**: While in `RST` state, `lut_wen_i` asserted writes `lut_write_data_i` to `lut_ram[lut_addr_reg]`, and `lut_rden_i` asserted reads `lut_ram[lut_addr_reg]` to `lut_read_data_o`. For both R/W operations, `lut_addr_reg` automatically increments (`+1`) to sequential addresses. **External logic must manage when to de-assert `reset_i` after the LUT RAM is fully configured.**")
+    mermaid_lines.append("        - **Automatic Sequence Start**: When `reset_i` falls to `0`, FSM transitions directly from `RST` to the state defined by `lut_ram[0x00]` (e.g., `PANEL_STABLE`). `lut_addr_reg` is reset to `0x00` at this point to start the sequence from the beginning.")
+    mermaid_lines.append("        - **Step-by-Step Sequence Execution**: Each command state (e.g., `PANEL_STABLE`, `BACK_BIAS`) performs its task. Upon task completion, the FSM always transitions to the **`IDLE` state**. At this point, `lut_addr_reg` still holds the address of the *just completed* command.")
+    mermaid_lines.append("        - **`IDLE` State Logic**: When in `IDLE`, the `lut_addr_reg` is first **incremented by `+1`**. Then, the **`eof` bit of the *previously completed command* (i.e., `current_eof` which reflects the LUT entry before the increment)** is checked:")
+    mermaid_lines.append("            - If `current_eof = 1` (meaning the last command was the end of the sequence), the FSM **loops back** to the beginning: `lut_addr_reg` is reset to `0x00`, and the FSM transitions to the state defined by `lut_ram[0x00]`.")
+    mermaid_lines.append("            - If `current_eof = 0` (meaning there are more commands in the sequence), the FSM transitions to the state defined by `lut_ram[new_lut_addr_reg]` (the newly incremented address).")
+    mermaid_lines.append("        - **`sequence_done_o`**: This output is asserted for one cycle when the FSM is in `IDLE` and the *previous* command indicated `eof=1`. It signals the completion of one full sequence loop.")
     mermaid_lines.append("    end note")
 
     mermaid_lines.append("```")
@@ -558,235 +437,17 @@ def generate_mermaid_fsm_diagram(fsm_config_path, lut_ram_config_path, output_fi
         f.write("\n".join(mermaid_lines))
     logging.info(f"Mermaid State Diagram generated successfully: {output_file}")
 
-# --- Main Execution ---
+
 if __name__ == "__main__":
-    # 1. Create dummy YAML config files (for testing this script directly)
-    # In a real project, these files would already exist.
-    with open("fsm_config.yaml", "w") as f:
-        f.write("""
-fsm_name: sequencer_fsm
-state_encoding_width: 3
+    FSM_CONFIG_PATH = "fsm_config.yaml"
+    LUT_RAM_DATA_PATH = "fsm_lut_ram_data.yaml"
+    SV_OUTPUT_PATH = "sequencer_fsm.sv"
+    MERMAID_OUTPUT_PATH = "fsm_diagram.md"
 
-inputs:
-  - name: clk
-    type: std_logic
-  - name: reset_n
-    type: std_logic
-  - name: command_id_i
-    type: std_logic_vector(7 downto 0)
+    logging.info(f"Generating SystemVerilog FSM to {SV_OUTPUT_PATH}...")
+    generate_systemverilog_fsm_with_lut_ram(FSM_CONFIG_PATH, LUT_RAM_DATA_PATH, SV_OUTPUT_PATH)
 
-  - name: task_done_i
-    type: std_logic
-  - name: adc_ready_i
-    type: std_logic
-  - name: sensor_stable_i
-    type: std_logic
-  - name: aed_detected_i
-    type: std_logic
+    logging.info(f"Generating Mermaid FSM diagram to {MERMAID_OUTPUT_PATH}...")
+    generate_mermaid_fsm_diagram(FSM_CONFIG_PATH, LUT_RAM_DATA_PATH, MERMAID_OUTPUT_PATH)
 
-outputs:
-  - name: current_state_o
-    type: std_logic_vector(2 downto 0)
-  - name: busy_o
-    type: std_logic
-  - name: sequence_done_o
-    type: std_logic
-
-  - name: current_repeat_count_o
-    type: std_logic_vector(7 downto 0)
-  - name: current_data_length_o
-    type: std_logic_vector(15 downto 0)
-  - name: current_eof_o
-    type: std_logic
-  - name: current_sof_o
-    type: std_logic
-
-states:
-  - name: IDLE
-    outputs: {busy_o: '0', sequence_done_o: '0', current_repeat_count_o: "8'h00", current_data_length_o: "16'h0000", current_eof_o: '0', current_sof_o: '0'}
-    transitions: []
-
-  - name: RST
-    outputs: {busy_o: '1', sequence_done_o: '0'}
-    transitions:
-      - condition: "task_done_i == '1'"
-        next_state: IDLE
-      - condition: "True"
-        next_state: RST
-
-  - name: PANEL_STABLE
-    outputs: {busy_o: '1', sequence_done_o: '0'}
-    transitions:
-      - condition: "sensor_stable_i == '1'"
-        next_state: IDLE
-      - condition: "True"
-        next_state: PANEL_STABLE
-
-  - name: BACK_BIAS
-    outputs: {busy_o: '1', sequence_done_o: '0'}
-    transitions:
-      - condition: "task_done_i == '1'"
-        next_state: IDLE
-      - condition: "True"
-        next_state: BACK_BIAS
-
-  - name: FLUSH
-    outputs: {busy_o: '1', sequence_done_o: '0'}
-    transitions:
-      - condition: "task_done_i == '1'"
-        next_state: IDLE
-      - condition: "True"
-        next_state: FLUSH
-
-  - name: EXPOSE_TIME
-    outputs: {busy_o: '1', sequence_done_o: '0'}
-    transitions:
-      - condition: "task_done_i == '1'"
-        next_state: IDLE
-      - condition: "True"
-        next_state: EXPOSE_TIME
-
-  - name: READOUT
-    outputs: {busy_o: '1', sequence_done_o: '0'}
-    transitions:
-      - condition: "task_done_i == '1' && adc_ready_i == '1'"
-        next_state: IDLE
-      - condition: "True"
-        next_state: READOUT
-
-  - name: AED_DETECT
-    outputs: {busy_o: '1', sequence_done_o: '0'}
-    transitions:
-      - condition: "aed_detected_i == '1'"
-        next_state: IDLE
-      - condition: "True"
-        next_state: AED_DETECT
-""")
-
-    with open("fsm_lut_ram_data.yaml", "w") as f:
-        f.write("""
-lut_ram_config:
-  address_width: 8
-  param_fields:
-    - name: repeat_count
-      width: 8
-    - name: data_length
-      width: 16
-    - name: eof
-      width: 1
-    - name: sof
-      width: 1
-
-lut_entries:
-  - address: 0x00
-    next_state: RST
-    repeat_count: 1
-    data_length: 1024
-    eof: 0
-    sof: 1
-  - address: 0x01
-    next_state: FLUSH
-    repeat_count: 1
-    data_length: 0
-    eof: 0
-    sof: 0
-  - address: 0x02
-    next_state: AED_DETECT
-    repeat_count: 1
-    data_length: 0
-    eof: 0
-    sof: 0
-  - address: 0x03
-    next_state: EXPOSE_TIME
-    repeat_count: 1
-    data_length: 0
-    eof: 1
-    sof: 0
-  - address: 0xFF
-    next_state: IDLE
-    repeat_count: 0
-    data_length: 0
-    eof: 0
-    sof: 0
-""")
-
-    # 2. Run Python simulation
-    print("Starting FSM Simulation (Python)...")
-    simulator = FsmSimulator("fsm_config.yaml", "fsm_lut_ram_data.yaml")
-
-    # Simulation Sequence Example
-    # Step 1: Send command_id_i = 0x00 (Go to RST from IDLE)
-    # lut_access_en_i and lut_read_write_mode_i are for external control during RST
-    simulator.set_inputs(command_id_i=0x00, task_done_i='0', adc_ready_i='0', sensor_stable_i='0', aed_detected_i='0',
-                         lut_access_en_i='0', lut_read_write_mode_i='0', lut_write_data_i=0)
-    simulator.step() # Current: IDLE, Next: RST, Params updated (lut_current_addr will be reset to 0 upon entering RST)
-    
-    # Step 2: In RST state, write some data to LUT RAM at address 0x00 (which is current_addr)
-    print("\n--- Simulating LUT RAM Write in RST State (Addr increments) ---")
-    # Prepare data to write: State: FLUSH (0b011), repeat_count: 5, data_length: 64, eof: 0, sof: 1
-    # Assuming state encoding width 3 bits, total_param_width 26 bits
-    # Data format: {next_state_encoding, sof, eof, data_length, repeat_count}
-    # FLUSH = 0b011
-    # 0b011 (state) | 1 (sof) | 0 (eof) | 64 (data_length) | 5 (repeat_count)
-    
-    # Example raw write data (for address 0x00)
-    # The actual combined integer value needs to be calculated based on bit widths
-    # For simulation, we'll just conceptually set lut_ram_model, but the Verilog logic needs the combined value.
-    # Total param width = 8 + 16 + 1 + 1 = 26 bits
-    # State width = 3 bits
-    # LUT Data width = 29 bits
-    
-    # Example: write FLUSH (0b011) with params {rep=5, data_len=64, eof=0, sof=1}
-    # params: sof (1b) + eof (1b) + data_length (16b) + repeat_count (8b) = 26 bits
-    # Data: {3'b011, 1'b1, 1'b0, 16'd64, 8'd5}
-    # Combined int value: (0b011 << 26) | (1 << 25) | (0 << 24) | (64 << 8) | (5 << 0)
-    
-    # Pre-calculating a complex combined value for demo:
-    # For state FLUSH (0b011), repeat_count = 5, data_length = 64, eof = 0, sof = 1
-    # params_bit_ranges: {'repeat_count': (0, 7), 'data_length': (8, 23), 'eof': (24, 24), 'sof': (25, 25)}
-    # State encoding for FLUSH is 0b011
-    # combined_param_value = (1 << 25) | (0 << 24) | (64 << 8) | (5 << 0)
-    # lut_data_word = (state_encoding['FLUSH'] << 26) | combined_param_value
-    # For Python simulator convenience, we still use simplified write_lut_ram:
-    simulator.write_lut_ram(simulator.lut_current_addr, "FLUSH", {'repeat_count': 5, 'data_length': 64, 'eof': 0, 'sof': 1})
-    simulator.set_inputs(command_id_i=0x00, task_done_i='0', adc_ready_i='0', sensor_stable_i='0', aed_detected_i='0',
-                         lut_access_en_i='1', lut_read_write_mode_i='1', lut_write_data_i=0) # lut_write_data_i will be the combined int
-    simulator.step() # Current: RST, Next: RST. Writes to addr 0x00, increments addr to 0x01.
-
-    # Step 3: In RST state, read from LUT RAM at address 0x01 (current_addr)
-    print("\n--- Simulating LUT RAM Read in RST State (Addr increments) ---")
-    simulator.set_inputs(command_id_i=0x00, task_done_i='0', adc_ready_i='0', sensor_stable_i='0', aed_detected_i='0',
-                         lut_access_en_i='1', lut_read_write_mode_i='0', lut_write_data_i=0)
-    simulator.step() # Current: RST, Next: RST. Reads from addr 0x01, increments addr to 0x02.
-
-    # Step 4: Exit RST state by task_done_i
-    simulator.set_inputs(command_id_i=0x00, task_done_i='1', adc_ready_i='0', sensor_stable_i='0', aed_detected_i='0',
-                         lut_access_en_i='0', lut_read_write_mode_i='0', lut_write_data_i=0)
-    simulator.step() # Current: RST, Next: IDLE. lut_current_addr is NOT reset here because it was reset upon entering RST.
-
-    # Step 5: Trigger command_id_i = 0x00 again. This time it should transition to FLUSH with new params.
-    # Note: If LUT RAM was updated at 0x00 in step 2, this will use the NEW entry.
-    print("\n--- Triggering updated LUT RAM entry (0x00) ---")
-    simulator.set_inputs(command_id_i=0x00, task_done_i='0', adc_ready_i='0', sensor_stable_i='0', aed_detected_i='0',
-                         lut_access_en_i='0', lut_read_write_mode_i='0', lut_write_data_i=0)
-    simulator.step() # Current: IDLE, Next: FLUSH, Params updated (from updated 0x00 entry)
-
-    print("\nFSM Simulation Complete.")
-
-    # 3. Generate SystemVerilog HDL code
-    print("\nGenerating SystemVerilog HDL code...")
-    generate_systemverilog_fsm_with_lut_ram("fsm_config.yaml", "fsm_lut_ram_data.yaml", "sequencer_fsm.sv")
-    print("SystemVerilog FSM with LUT RAM runtime update code generated successfully: sequencer_fsm.sv")
-
-    # 4. Generate Mermaid State Diagram 
-    print("\nGenerating Mermaid State Diagram...")
-    generate_mermaid_fsm_diagram("fsm_config.yaml", "fsm_lut_ram_data.yaml", "fsm_diagram.md")
-    print("Mermaid State Diagram generated successfully: fsm_diagram.md")
-
-
-    # Clean up dummy config files
-    import os
-    # os.remove("fsm_config.yaml")
-    # os.remove("fsm_lut_ram_data.yaml")
-    # os.remove("fsm_diagram.md")
-    print("Dummy config files removed.")
+    logging.info("Generation complete. Please check the generated files.")
