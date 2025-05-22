@@ -20,8 +20,8 @@ lut_entries:
     sof: 1
   - address: 0x01
     next_state: FLUSH
-    repeat_count: 1
-    data_length: 0
+    repeat_count: 5 # Changed repeat count for FLUSH
+    data_length: 128 # Changed data length for FLUSH
     eof: 0
     sof: 0
   - address: 0x02
@@ -35,6 +35,12 @@ lut_entries:
     repeat_count: 1
     data_length: 0
     eof: 1
+    sof: 0
+  - address: 0x04
+    next_state: READOUT
+    repeat_count: 1
+    data_length: 2048
+    eof: 0
     sof: 0
   - address: 0xFF
     next_state: IDLE

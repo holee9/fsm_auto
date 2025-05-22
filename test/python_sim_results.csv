@@ -1,0 +1,6 @@
+clk_cycle,current_state_py,busy_py,sequence_done_py,repeat_count_py,data_length_py,eof_py,sof_py
+0,FLUSH,0,0,5,128,0,0
+1,FLUSH,1,0,5,128,0,0
+2,FLUSH,1,0,5,128,0,0
+3,FLUSH,1,0,5,128,0,0
+4,FLUSH,1,0,5,128,0,0
