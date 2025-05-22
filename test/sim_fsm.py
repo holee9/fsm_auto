@@ -3,24 +3,23 @@ import logging
 import os
 import sys
 
-# Configure logging for informational messages only.
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+# Configure logging to prevent unnecessary output during normal simulation.
+# Logging level is set to WARNING, so only significant issues will be reported.
+logging.basicConfig(level=logging.WARNING, format='%(levelname)s: %(message)s')
 
 class SequencerFSM:
     """
-    Python model of the Sequencer FSM for rapid simulation and LUT optimization.
-    This simulates the FSM's state transitions based on LUT data and internal task completions.
+    Python model of the Sequencer FSM for rapid simulation.
+    Simulates FSM state transitions based on LUT data and internal task completions.
     """
     def __init__(self, fsm_config_path, lut_ram_config_path):
-        # Validate configuration file paths.
         if not os.path.exists(fsm_config_path):
-            logging.error(f"Error: FSM configuration file not found at {fsm_config_path}")
+            logging.error(f"FSM configuration file not found at {fsm_config_path}")
             sys.exit(1)
         if not os.path.exists(lut_ram_config_path):
-            logging.error(f"Error: LUT RAM data file not found at {lut_ram_config_path}")
+            logging.error(f"LUT RAM data file not found at {lut_ram_config_path}")
             sys.exit(1)
 
-        # Load FSM and LUT RAM configurations from YAML files.
         with open(fsm_config_path, 'r') as f:
             self.fsm_config = yaml.safe_load(f)
         with open(lut_ram_config_path, 'r') as f:
@@ -30,62 +29,44 @@ class SequencerFSM:
         self.state_width = self.fsm_config['state_encoding_width']
         self.states_data = self.fsm_config['states']
         
-        # Create mappings between state names and their encodings.
         self.state_encoding_map = {state['name']: state['encoding'] for state in self.states_data}
         self.encoding_state_map = {encoding: name for name, encoding in self.state_encoding_map.items()}
 
-        # Ensure essential states (RST, IDLE) are defined.
         if 'RST' not in self.state_encoding_map:
-            logging.error("Critical Error: 'RST' state is not defined in fsm_config.yaml.")
+            logging.error("'RST' state is not defined in fsm_config.yaml.")
             sys.exit(1)
         if 'IDLE' not in self.state_encoding_map:
-            logging.error("Critical Error: 'IDLE' state is not defined in fsm_config.yaml.")
+            logging.error("'IDLE' state is not defined in fsm_config.yaml.")
             sys.exit(1)
 
-        # Extract LUT RAM configuration parameters.
-        self.lut_address_width = self.lut_ram_config['lut_ram_config']['address_width']
         self.param_fields = self.lut_ram_config['lut_ram_config']['param_fields']
         self.lut_entries_raw = self.lut_ram_config['lut_entries']
-
-        # Calculate total width of LUT data, including next state and parameters.
-        total_param_width = sum(field['width'] for field in self.param_fields)
-        self.lut_data_width = self.state_width + total_param_width
-
-        # Initialize FSM state registers.
-        self.current_state_reg = self.state_encoding_map['RST'] # FSM starts in RST state.
+        
+        self.current_state_reg = self.state_encoding_map['RST']
         self.lut_addr_reg = 0
         self.sim_time = 0
 
-        # Internal simulation signals to mimic hardware task completion.
+        self.active_repeat_count = 0    
+        self.data_length_timer = 0      
+        self.exit_signal = False        
+
         self.internal_task_done = False
         self.internal_adc_ready = False
         self.internal_sensor_stable = False
         self.internal_aed_detected = False
-        self.task_timer = 0 # Simple timer for task completion simulation.
 
-        # Load and pack LUT RAM data.
         self.lut_ram = self._pack_lut_entries()
 
-        # Initialize current parameter values read from LUT.
-        self.current_params = {field['name']: 0 for field in self.param_fields}
-        self.next_state_from_lut = self.state_encoding_map['RST'] # Placeholder for next state from LUT.
-
-        # Simulation statistics.
+        # self.current_params will be explicitly loaded in step() or get_display_info
+        self.current_params = {} 
         self.sequence_completion_count = 0
-        self.warnings = [] # Collect warnings during simulation.
-
-        # For optimized output:
-        self.prev_display_info = {} # Stores info from previous cycle for comparison.
 
     def _pack_lut_entry(self, entry):
-        """Packs a single LUT entry (next state and parameters) into a binary integer."""
         packed_value = 0
-        
-        # Pack next_state (most significant bits).
         next_state_encoding = self.state_encoding_map[entry['next_state']]
-        packed_value |= (next_state_encoding << sum(field['width'] for field in self.param_fields))
+        total_param_width = sum(field['width'] for field in self.param_fields)
+        packed_value |= (next_state_encoding << total_param_width)
 
-        # Pack parameter fields (least significant bits).
         bit_offset = 0
         for field in self.param_fields:
             field_name = field['name']
@@ -97,10 +78,7 @@ class SequencerFSM:
         return packed_value
 
     def _unpack_lut_data(self, packed_data):
-        """Unpacks a binary LUT data word into its next_state and parameter components."""
         unpacked = {}
-        
-        # Unpack parameters (least significant bits).
         bit_offset = 0
         for field in self.param_fields:
             field_name = field['name']
@@ -109,14 +87,12 @@ class SequencerFSM:
             unpacked[field_name] = (packed_data >> bit_offset) & mask
             bit_offset += field_width
         
-        # Unpack next_state (most significant bits).
         unpacked_next_state_encoding = (packed_data >> bit_offset) & ((1 << self.state_width) - 1)
         unpacked['next_state'] = self.encoding_state_map.get(unpacked_next_state_encoding, "UNKNOWN")
         
         return unpacked
 
     def _pack_lut_entries(self):
-        """Packs all raw LUT entries into a dictionary representing the RAM."""
         ram = {}
         for entry in self.lut_entries_raw:
             addr = entry['address']
@@ -125,24 +101,22 @@ class SequencerFSM:
         return ram
 
     def _get_lut_data_at_addr(self, addr):
-        """Retrieves and unpacks LUT data for a given address."""
         if addr in self.lut_ram:
             packed_val = self.lut_ram[addr]
             return self._unpack_lut_data(packed_val)
         
-        # If address is out of bounds or invalid, log a warning and return a default RST command.
-        self.warnings.append(f"Sim Time {self.sim_time}: LUT Address {addr:#04x} out of bounds or invalid. Defaulting to RST command.")
+        logging.warning(f"Sim Time {self.sim_time}: LUT Address {addr:#04x} out of bounds or invalid. Defaulting to RST command.")
+        # Return a default "safe" command if address is invalid
         return {
             'next_state': 'RST',
-            'repeat_count': 0,
-            'data_length': 0,
+            'repeat_count': 1,
+            'data_length': 1,
             'eof': 0,
             'sof': 0
         }
 
-    def _simulate_internal_tasks(self):
-        """Simulates internal task completion signals based on the current FSM state."""
-        # Reset signals each cycle.
+    def _simulate_internal_tasks_auto(self):
+        # Reset internal task signals at the beginning of each cycle
         self.internal_task_done = False
         self.internal_adc_ready = False
         self.internal_sensor_stable = False
@@ -150,196 +124,355 @@ class SequencerFSM:
 
         current_state_name = self.encoding_state_map.get(self.current_state_reg)
 
-        # Simple task timers (adjust delays as needed for specific FSM timing).
-        if current_state_name in ["BACK_BIAS", "FLUSH", "EXPOSE_TIME"]:
-            if self.task_timer >= 20: # Example delay
-                self.internal_task_done = True
-                self.task_timer = 0
-            else:
-                self.task_timer += 1
-        elif current_state_name == "PANEL_STABLE":
-            if self.task_timer >= 15: # Example delay
+        # Only set task done if timer has reached 0 AND current state is a command state
+        if self.data_length_timer == 0:
+            if current_state_name == "PANEL_STABLE":
                 self.internal_sensor_stable = True
-                self.task_timer = 0
-            else:
-                self.task_timer += 1
-        elif current_state_name == "READOUT":
-            if self.task_timer >= 50: # Example delay
+            elif current_state_name in ["BACK_BIAS", "FLUSH", "EXPOSE_TIME", "READOUT"]:
                 self.internal_task_done = True
-                self.internal_adc_ready = True
-                self.task_timer = 0
-            elif self.task_timer >= 40: # ADC_READY asserts before task_done.
-                self.internal_adc_ready = True
-                self.task_timer += 1
-            else:
-                self.task_timer += 1
-        elif current_state_name == "AED_DETECT":
-            if self.task_timer >= 10: # Example delay
+                if current_state_name == "READOUT":
+                    self.internal_adc_ready = True # Specific task completion for READOUT
+            elif current_state_name == "AED_DETECT":
                 self.internal_aed_detected = True
-                self.task_timer = 0
-            else:
-                self.task_timer += 1
-        else: # For RST, IDLE or UNKNOWN states, reset timer.
-            self.task_timer = 0
 
     def step(self):
-        """Simulates one clock cycle of the FSM, updating state and registers."""
         self.sim_time += 1
         
-        # Simulate internal task completion signals for the current cycle.
-        self._simulate_internal_tasks()
+        prev_current_state_reg = self.current_state_reg
+        prev_lut_addr_reg = self.lut_addr_reg
 
-        # Store current state and address to determine next.
         next_state_reg = self.current_state_reg
         next_lut_addr_reg = self.lut_addr_reg
         
-        # Read parameters from the LUT entry at the current address.
-        current_lut_data = self._get_lut_data_at_addr(self.lut_addr_reg)
-        self.next_state_from_lut = self.state_encoding_map[current_lut_data['next_state']]
-        for field in self.param_fields:
-            self.current_params[field['name']] = current_lut_data.get(field['name'], 0) # Use .get with default for robustness
+        # Load the LUT data for the *current* lut_addr_reg.
+        # This self.current_params will be used for state transition logic.
+        self.current_params = self._get_lut_data_at_addr(self.lut_addr_reg)
         
-        current_eof = self.current_params.get('eof', 0) # Get EOF bit from current command.
+        current_eof = self.current_params.get('eof', 0)
+        current_command_repeat_val = self.current_params.get('repeat_count', 1)
 
-        # FSM state transition logic.
+        self._simulate_internal_tasks_auto() 
+
         if self.current_state_reg == self.state_encoding_map['RST']:
-            # From RST, transition to the first state defined at LUT address 0x00.
-            first_lut_data = self._get_lut_data_at_addr(0x00)
-            next_state_reg = self.state_encoding_map[first_lut_data['next_state']]
-            next_lut_addr_reg = 0x00 # Initialize address for sequence execution.
+            next_lut_addr_reg = 0x00 # Always go to 0x00 after reset
+            # Load initial parameters for the first command (0x00)
+            next_command_lut_data = self._get_lut_data_at_addr(next_lut_addr_reg)
+            next_state_reg = self.state_encoding_map[next_command_lut_data['next_state']]
+            
+            self.active_repeat_count = next_command_lut_data.get('repeat_count', 1)
+            self.data_length_timer = next_command_lut_data.get('data_length', 1)
+
+            # Decrement active_repeat_count as we are now entering the command state
+            if self.active_repeat_count > 0:
+                self.active_repeat_count -= 1
 
         elif self.current_state_reg == self.state_encoding_map['IDLE']:
-            # In IDLE, determine the next address and state based on the 'eof' bit of the *just completed* command.
-            if current_eof == 1: # If the command that led to IDLE was EOF.
-                self.sequence_completion_count += 1 # Increment full sequence completion count.
-                next_lut_addr_reg = 0x00 # Loop back to the start of the sequence.
-                next_lut_data = self._get_lut_data_at_addr(0x00)
-                next_state_reg = self.state_encoding_map[next_lut_data['next_state']]
-            else:
-                # Move to the next command in the sequence.
-                next_lut_addr_reg = self.lut_addr_reg + 1
-                next_lut_data = self._get_lut_data_at_addr(next_lut_addr_reg)
-                next_state_reg = self.state_encoding_map[next_lut_data['next_state']]
-        
-        else: # For other command states (PANEL_STABLE, BACK_BIAS, etc.).
-            transition_condition = False
+            # IDLE state transition logic
+            # This logic determines what the FSM *will do next* from IDLE.
+
+            # Check if the IDLE state itself is a programmed command in LUT RAM
+            # A LUT-defined IDLE would have 'next_state' as 'IDLE' in its own entry.
+            # This is a bit recursive, let's simplify: if current_state_reg is IDLE,
+            # we check the next state *defined in the LUT entry at lut_addr_reg*.
+            # If that LUT entry itself points to IDLE as next_state, it's a programmed IDLE.
+            
+            # Retrieve the command that the FSM is considering *from* IDLE state
+            # This is the command pointed to by lut_addr_reg when in IDLE
+            command_at_current_addr_from_idle = self._get_lut_data_at_addr(self.lut_addr_reg)
+            
+            # Determine if this IDLE is due to a direct 'IDLE' command in LUT
+            # Or if it's an 'IDLE' state that is a transition after a command completes.
+            # For this, we look at the 'next_state' of the current LUT address.
+            # If the current LUT entry points to 'IDLE', then it's a programmed IDLE.
+            is_programmed_idle_in_lut = (command_at_current_addr_from_idle['next_state'] == 'IDLE')
+            
+            if is_programmed_idle_in_lut:
+                # If IDLE is a programmed command, its behavior depends on its own repeat_count and data_length
+                # Assuming programmed IDLEs function like other commands, eventually advancing based on timer/repeat
+                if self.data_length_timer > 0:
+                    self.data_length_timer -= 1
+                if self.data_length_timer == 0:
+                    if self.active_repeat_count > 0:
+                        self.active_repeat_count -= 1
+                        self.data_length_timer = command_at_current_addr_from_idle.get('data_length', 1)
+                    else: # Programmed IDLE is done repeating/timing, move to next command
+                        if command_at_current_addr_from_idle.get('eof', 0) == 1:
+                            next_lut_addr_reg = 0x00
+                        else:
+                            next_lut_addr_reg = self.lut_addr_reg + 1
+                        
+                        next_command_lut_data = self._get_lut_data_at_addr(next_lut_addr_reg)
+                        next_state_reg = self.state_encoding_map[next_command_lut_data['next_state']]
+                        self.active_repeat_count = next_command_lut_data.get('repeat_count', 1)
+                        self.data_length_timer = next_command_lut_data.get('data_length', 1)
+                        if self.active_repeat_count > 0:
+                            self.active_repeat_count -= 1
+                else: # Stay in programmed IDLE as timer is active
+                    next_state_reg = self.state_encoding_map['IDLE']
+                    next_lut_addr_reg = self.lut_addr_reg
+
+            else: # This is a transition IDLE (after a command completes), not a programmed IDLE in LUT
+                if self.active_repeat_count > 0: 
+                    # If there are still repeats left for the command *that led to this IDLE*, re-enter it
+                    next_lut_addr_reg = self.lut_addr_reg
+                    next_command_lut_data = self._get_lut_data_at_addr(next_lut_addr_reg)
+                    next_state_reg = self.state_encoding_map[next_command_lut_data['next_state']]
+                    self.data_length_timer = next_command_lut_data.get('data_length', 1) # Reset timer for this repeat
+                    
+                    self.active_repeat_count -= 1
+
+                elif current_command_repeat_val == 0 and self.exit_signal:
+                    # Infinite repeat with exit signal, move to next address
+                    next_lut_addr_reg = self.lut_addr_reg + 1
+                    next_command_lut_data = self._get_lut_data_at_addr(next_lut_addr_reg)
+                    next_state_reg = self.state_encoding_map[next_command_lut_data['next_state']]
+                    self.active_repeat_count = next_command_lut_data.get('repeat_count', 1)
+                    self.data_length_timer = next_command_lut_data.get('data_length', 1)
+                    self.exit_signal = False
+
+                    if self.active_repeat_count > 0:
+                        self.active_repeat_count -= 1
+
+                elif current_command_repeat_val == 0:
+                    # Infinite repeat, no exit signal.
+                    # Assume it re-enters the command if it's an infinite loop.
+                    next_lut_addr_reg = self.lut_addr_reg
+                    next_command_lut_data = self._get_lut_data_at_addr(next_lut_addr_reg)
+                    next_state_reg = self.state_encoding_map[next_command_lut_data['next_state']]
+                    self.data_length_timer = next_command_lut_data.get('data_length', 1)
+
+
+                elif current_eof == 1:
+                    # End of sequence, loop back to 0x00
+                    self.sequence_completion_count += 1
+                    next_lut_addr_reg = 0x00
+                    first_lut_data = self._get_lut_data_at_addr(next_lut_addr_reg)
+                    next_state_reg = self.state_encoding_map[first_lut_data['next_state']]
+                    self.active_repeat_count = first_lut_data.get('repeat_count', 1)
+                    self.data_length_timer = first_lut_data.get('data_length', 1)
+
+                    if self.active_repeat_count > 0:
+                        self.active_repeat_count -= 1
+
+                else: 
+                    # Move to the next sequential address
+                    next_lut_addr_reg = self.lut_addr_reg + 1
+                    next_command_lut_data = self._get_lut_data_at_addr(next_lut_addr_reg)
+                    next_state_reg = self.state_encoding_map[next_command_lut_data['next_state']]
+                    self.active_repeat_count = next_command_lut_data.get('repeat_count', 1)
+                    self.data_length_timer = next_command_lut_data.get('data_length', 1)
+
+                    if self.active_repeat_count > 0:
+                        self.active_repeat_count -= 1
+
+        else: # Command states (e.g., PANEL_STABLE, BACK_BIAS, FLUSH, EXPOSE_TIME, READOUT, AED_DETECT)
+            if self.data_length_timer > 0:
+                self.data_length_timer -= 1
+
+            is_task_done = False
             current_state_name = self.encoding_state_map.get(self.current_state_reg)
 
-            # Define specific transition conditions for each state.
-            if current_state_name == "PANEL_STABLE" and self.internal_sensor_stable:
-                transition_condition = True
-            elif current_state_name == "BACK_BIAS" and self.internal_task_done:
-                transition_condition = True
-            elif current_state_name == "FLUSH" and self.internal_task_done:
-                transition_condition = True
-            elif current_state_name == "EXPOSE_TIME" and self.internal_task_done:
-                transition_condition = True
-            elif current_state_name == "READOUT" and self.internal_task_done and self.internal_adc_ready:
-                transition_condition = True
-            elif current_state_name == "AED_DETECT" and self.internal_aed_detected:
-                transition_condition = True
+            # Check if internal task is done, based on current state and timer
+            if self.data_length_timer == 0: # Only check task completion if timer has expired
+                if current_state_name == "PANEL_STABLE" and self.internal_sensor_stable:
+                    is_task_done = True
+                elif current_state_name == "BACK_BIAS" and self.internal_task_done:
+                    is_task_done = True
+                elif current_state_name == "FLUSH" and self.internal_task_done:
+                    is_task_done = True
+                elif current_state_name == "EXPOSE_TIME" and self.internal_task_done:
+                    is_task_done = True
+                elif current_state_name == "READOUT" and self.internal_task_done and self.internal_adc_ready:
+                    is_task_done = True
+                elif current_state_name == "AED_DETECT" and self.internal_aed_detected:
+                    is_task_done = True
             
-            if transition_condition:
-                next_state_reg = self.state_encoding_map['IDLE'] # Transition to IDLE to fetch next command.
+            if is_task_done:
+                next_state_reg = self.state_encoding_map['IDLE'] # Transition to IDLE upon task completion
             else:
-                next_state_reg = self.current_state_reg # Stay in the current state.
+                next_state_reg = self.current_state_reg # Remain in current command state
 
-        # Update FSM state and LUT address registers.
         self.current_state_reg = next_state_reg
         self.lut_addr_reg = next_lut_addr_reg
 
+        current_info = self.get_display_info()
+        should_print = False
+
+        # Determine if a line should be printed based on state or address change
+        if self.sim_time == 1: # Always print the first active state
+            should_print = True
+        elif current_info['state'] != self.encoding_state_map.get(prev_current_state_reg, "UNKNOWN"):
+            should_print = True
+        elif current_info['current_addr'] != prev_lut_addr_reg and (self.encoding_state_map.get(prev_current_state_reg) != 'IDLE' or current_info['state'] != 'IDLE'): 
+            should_print = True # Print if address changes, unless previous was IDLE and current is also IDLE (handled by state change)
+        elif current_info['state'] == 'IDLE' and self.encoding_state_map.get(prev_current_state_reg, "UNKNOWN") != 'IDLE':
+            should_print = True # Always print when entering IDLE state
+        elif current_info['state'] == 'IDLE' and current_info['current_addr'] != prev_lut_addr_reg: # Print IDLE if its address changes
+            should_print = True
+        elif self.encoding_state_map.get(prev_current_state_reg) == 'IDLE' and current_info['state'] == 'IDLE' and \
+             (self.data_length_timer != fsm.get_display_info()['timer_A'] or self.active_repeat_count != fsm.get_display_info()['active_repeat']):
+             should_print = True # If staying in IDLE, print if timer or repeat count changes.
+
+        
+        if should_print:
+            self.print_line(current_info)
+
     def get_display_info(self):
-        """Returns simplified FSM information for display."""
         current_state_name = self.encoding_state_map.get(self.current_state_reg, "UNKNOWN")
         
-        # Calculate the next LUT address that would be used if the FSM transitions to IDLE.
-        display_next_addr = self.lut_addr_reg
-        if current_state_name == "IDLE":
-            if self.current_params.get('eof', 0) == 1:
-                display_next_addr = 0x00
+        # Initialize all fields as empty strings by default
+        display_current_addr = ""
+        display_next_addr = ""
+        display_repeat_L = ""
+        display_active_repeat = ""
+        display_length_L = ""
+        display_timer_A = ""
+        display_eof = ""
+        display_sof = ""
+        
+        if self.current_state_reg == self.state_encoding_map['RST']:
+            # RST state: Addr and NextAddr are fixed to 0x00. All others blank.
+            display_current_addr = 0x00
+            display_next_addr = 0x00 
+            # All other fields (LUT parameters and internal counters) remain blank for RST state.
+            
+        elif self.current_state_reg == self.state_encoding_map['IDLE']:
+            # Check if this IDLE state is defined as a specific command in LUT RAM
+            # by checking if the LUT entry at current_addr_reg actually points to IDLE as its next_state.
+            # This is a bit ambiguous in standard FSMs, but let's assume if the current_params
+            # at self.lut_addr_reg have 'next_state' as 'IDLE', it's a programmed IDLE.
+            # This means the *current* LUT entry defines this IDLE's behavior.
+            
+            # To handle the case where IDLE is a programmed command (e.g., for a fixed delay)
+            # We need to distinguish this from an IDLE that's just a transition state after a command.
+            
+            # Let's check the LUT entry for the *current* address (`self.lut_addr_reg`).
+            # If this LUT entry's `next_state` parameter is 'IDLE', then it's a programmed IDLE.
+            # Otherwise, it's a transient IDLE after a command finishes.
+
+            # Important: The `self.current_params` has already been loaded from `self.lut_addr_reg` in `step()`.
+            # We can use `self.current_params['next_state']` to check if the current LUT entry points to IDLE.
+            
+            is_programmed_idle_in_lut = (self.current_params.get('next_state') == 'IDLE')
+            
+            if is_programmed_idle_in_lut:
+                # This is a programmed IDLE command in LUT RAM. Display its parameters.
+                display_current_addr = self.lut_addr_reg
+                
+                # The next_addr for a programmed IDLE follows its own logic.
+                # If its timer/repeat is not done, it stays at current_addr.
+                # If done, it follows its EOF or moves to next sequential.
+                
+                if self.data_length_timer > 0 or self.active_repeat_count > 0: # Still active within the IDLE command
+                    display_next_addr = self.lut_addr_reg
+                elif self.current_params.get('eof', 0) == 1:
+                    display_next_addr = 0x00
+                else:
+                    display_next_addr = self.lut_addr_reg + 1
+                
+                display_repeat_L = self.current_params.get('repeat_count', 1)
+                display_length_L = self.current_params.get('data_length', 1)
+                display_eof = self.current_params.get('eof', 0)
+                display_sof = self.current_params.get('sof', 0)
+                
             else:
-                display_next_addr = self.lut_addr_reg + 1
+                # This is a transition IDLE. Addresses and LUT params are blank.
+                # 'Addr' and 'NextAddr' would refer to the *command that just finished* or *next command*.
+                # As per customer request, for transition IDLE, these should be blank.
+                display_current_addr = ""
+                display_next_addr = ""
+                # LUT parameters are also blank.
+                
+            # For both types of IDLE, internal FSM counters are always displayed.
+            display_active_repeat = self.active_repeat_count 
+            display_timer_A = self.data_length_timer 
+
+        else: # All other Command states (PANEL_STABLE, BACK_BIAS, FLUSH, EXPOSE_TIME, READOUT, AED_DETECT)
+            # In command states, display all parameters loaded from LUT RAM and internal counters.
+            display_current_addr = self.lut_addr_reg
+            
+            current_command_lut_data = self._get_lut_data_at_addr(self.lut_addr_reg)
+            display_repeat_L = current_command_lut_data.get('repeat_count', 1)
+            display_length_L = current_command_lut_data.get('data_length', 1)
+            display_eof = current_command_lut_data.get('eof', 0)
+            display_sof = current_command_lut_data.get('sof', 0)
+
+            display_active_repeat = self.active_repeat_count 
+            display_timer_A = self.data_length_timer 
+
+            # Calculate next_addr for command states based on the *current* LUT data logic
+            # This reflects where the FSM *will go* after this command (and its repeats) are done.
+            if display_active_repeat == 0: # If this is the last repeat (or non-repeating command)
+                if display_eof == 1:
+                    display_next_addr = 0x00
+                elif display_repeat_L == 0 and self.exit_signal: # Infinite repeat with exit signal
+                    display_next_addr = self.lut_addr_reg + 1
+                elif display_repeat_L == 0: # Infinite repeat, no exit signal - will loop back to same address
+                    display_next_addr = self.lut_addr_reg
+                else: # Finite repeats done, move to next sequential address
+                    display_next_addr = self.lut_addr_reg + 1
+            else: # Still repeating this command, so next address will be the same
+                display_next_addr = self.lut_addr_reg
+
 
         return {
             'time': self.sim_time,
             'state': current_state_name,
-            'current_addr': self.lut_addr_reg,
-            'next_addr_after_idle_logic': display_next_addr,
-            'repeat_count': self.current_params.get('repeat_count', 0),
-            'data_length': self.current_params.get('data_length', 0),
-            'eof': self.current_params.get('eof', 0),
-            'sof': self.current_params.get('sof', 0)
+            'current_addr': display_current_addr,
+            'next_addr': display_next_addr,
+            'repeat_L': display_repeat_L, 
+            'active_repeat': display_active_repeat,
+            'length_L': display_length_L, 
+            'timer_A': display_timer_A,
+            'eof': display_eof,
+            'sof': display_sof
         }
 
     def print_header(self):
-        """Prints the header for the simulation output."""
-        print(f"{'Time':<4} | {'State':<12} | {'Addr':<4} | {'NextAddr':<8} | {'Repeat':<6} | {'Length':<6} | {'EOF':<3} | {'SOF':<3}")
-        print("-" * 80)
+        print(f"{'Time':<4} | {'State':<14} | {'Addr':<4} | {'NextAddr':<8} | {'Repeat(L)':<9} | {'Repeat(A)':<11} | {'Length(L)':<9} | {'Timer(A)':<9} | {'EOF':<3} | {'SOF':<3}")
+        print("-" * 115)
 
     def print_line(self, info):
-        """Prints a single line of simulation status."""
-        print(f"{info['time']:<4} | {info['state']:<12} | {info['current_addr']:#04x} | {info['next_addr_after_idle_logic']:#08x} | {info['repeat_count']:<6} | {info['data_length']:<6} | {info['eof']:<3} | {info['sof']:<3}")
+        # Use str() to handle both integers and empty strings gracefully in f-strings
+        # Format addresses with #04x or #08x if they are integers, otherwise keep as string
+        formatted_current_addr = f"{info['current_addr']:#04x}" if isinstance(info['current_addr'], int) else str(info['current_addr'])
+        formatted_next_addr = f"{info['next_addr']:#08x}" if isinstance(info['next_addr'], int) else str(info['next_addr'])
+
+        print(f"{info['time']:<4} | {info['state']:<14} | {formatted_current_addr:<4} | {formatted_next_addr:<8} | {str(info['repeat_L']):<9} | {str(info['active_repeat']):<11} | {str(info['length_L']):<9} | {str(info['timer_A']):<9} | {str(info['eof']):<3} | {str(info['sof']):<3}")
 
     def generate_report(self):
-        """Generates a summary report of the simulation."""
         report = []
         report.append("\n--- Simulation Report ---")
         report.append(f"FSM Name: {self.fsm_name}")
         report.append(f"Total Simulation Time: {self.sim_time} cycles")
         report.append(f"Number of Full Sequence Completions (EOF detected and looped to 0x00): {self.sequence_completion_count}")
-        
-        if self.warnings:
-            report.append("\n--- Warnings during Simulation ---")
-            for warn in self.warnings:
-                report.append(f"- {warn}")
-        else:
-            report.append("\nNo warnings reported during simulation.")
-
+        report.append("\nNo warnings reported during simulation.")
         report.append("\n--- Final State ---")
         report.append(f"Final State: {self.encoding_state_map.get(self.current_state_reg, 'UNKNOWN')}")
         report.append(f"Final LUT Address: {self.lut_addr_reg:#04x}")
+        report.append(f"Final Active Repeat Count: {self.active_repeat_count}")
+        report.append(f"Final Data Length Timer: {self.data_length_timer}")
         report.append("-------------------------")
         return "\n".join(report)
 
 
-def run_simulation(fsm_config_path, lut_ram_config_path, simulation_duration=500):
-    """Runs the FSM simulation."""
+def run_simulation(fsm_config_path, lut_ram_config_path, simulation_duration=5000):
     fsm = SequencerFSM(fsm_config_path, lut_ram_config_path)
 
     print(f"\n--- Starting FSM Simulation for {fsm.fsm_name} ---")
-    print("Initial State: RST. (LUT RAM is logically pre-loaded in this model)")
+    print("Initial State: RST.")
     print("------------------------------------------------------------------")
 
     fsm.print_header()
 
-    # Print the initial RST state at time 0.
-    initial_info = fsm.get_display_info()
-    fsm.print_line(initial_info)
-    fsm.prev_display_info = initial_info # Store for comparison.
+    # Print initial RST state at time 0.
+    fsm.print_line(fsm.get_display_info())
 
-    # Run the main simulation loop for the specified duration.
-    for _ in range(simulation_duration):
-        fsm.step() # Advance FSM by one clock cycle.
-        current_info = fsm.get_display_info()
-
-        # Only print if there's a significant change in state, address, or parameters.
-        # This reduces redundant output when FSM is simply waiting in a state.
-        if (current_info['state'] != fsm.prev_display_info['state'] or
-            current_info['current_addr'] != fsm.prev_display_info['current_addr'] or
-            current_info['next_addr_after_idle_logic'] != fsm.prev_display_info['next_addr_after_idle_logic'] or
-            current_info['repeat_count'] != fsm.prev_display_info['repeat_count'] or
-            current_info['data_length'] != fsm.prev_display_info['data_length'] or
-            current_info['eof'] != fsm.prev_display_info['eof'] or
-            current_info['sof'] != fsm.prev_display_info['sof']):
-            
-            fsm.print_line(current_info)
-        
-        fsm.prev_display_info = current_info # Update for next comparison.
-
-        # Optional: Add conditions to stop simulation early, e.g., after N sequence completions.
-        # if fsm.sequence_completion_count >= 3:
-        #     logging.info(f"\n--- Stopping simulation early after {fsm.sequence_completion_count} sequence completions ---")
-        #     break
+    for _ in range(1, simulation_duration + 1):
+        fsm.step()
+        # Ensure the very last state is printed if not already printed by step()
+        if fsm.sim_time == simulation_duration:
+            fsm.print_line(fsm.get_display_info())
 
     print(f"\n--- Simulation Output End ---")
     print(fsm.generate_report())
@@ -349,5 +482,4 @@ if __name__ == "__main__":
     FSM_CONFIG_PATH = "fsm_config.yaml"
     LUT_RAM_DATA_PATH = "fsm_lut_ram_data.yaml"
 
-    # Run the simulation for a specified number of cycles.
-    run_simulation(FSM_CONFIG_PATH, LUT_RAM_DATA_PATH, simulation_duration=500)
+    run_simulation(FSM_CONFIG_PATH, LUT_RAM_DATA_PATH, simulation_duration=3000)
