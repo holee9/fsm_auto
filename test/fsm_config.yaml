@@ -1,110 +1,110 @@
-# fsm_config.yaml
-
 fsm_name: sequencer_fsm
-state_encoding_width: 3 # Enough for 8 states (0-7), adjust if more states are added
-
+state_encoding_width: 3
 states:
-  - name: RST
-    encoding: 0
-  - name: IDLE
-    encoding: 1
-  - name: PANEL_STABLE
-    encoding: 2
-    outputs:
-      panel_enable_o: 1
-      bias_enable_o: 0
-      flush_enable_o: 0
-      expose_enable_o: 0
-      readout_enable_o: 0
-      aed_enable_o: 0
-  - name: BACK_BIAS
-    encoding: 3
-    outputs:
-      panel_enable_o: 0
-      bias_enable_o: 1
-      flush_enable_o: 0
-      expose_enable_o: 0
-      readout_enable_o: 0
-      aed_enable_o: 0
-  - name: FLUSH
-    encoding: 4
-    outputs:
-      panel_enable_o: 0
-      bias_enable_o: 0
-      flush_enable_o: 1
-      expose_enable_o: 0
-      readout_enable_o: 0
-      aed_enable_o: 0
-  - name: AED_DETECT
-    encoding: 5
-    outputs:
-      panel_enable_o: 0
-      bias_enable_o: 0
-      flush_enable_o: 0
-      expose_enable_o: 0
-      readout_enable_o: 0
-      aed_enable_o: 1
-  - name: EXPOSE_TIME
-    encoding: 6
-    outputs:
-      panel_enable_o: 0
-      bias_enable_o: 0
-      flush_enable_o: 0
-      expose_enable_o: 1
-      readout_enable_o: 0
-      aed_enable_o: 0
-  - name: READOUT
-    encoding: 7
-    outputs:
-      panel_enable_o: 0
-      bias_enable_o: 0
-      flush_enable_o: 0
-      expose_enable_o: 0
-      readout_enable_o: 1
-      aed_enable_o: 0
-
+- name: RST
+  encoding: 0
+- name: IDLE
+  encoding: 1
+- name: PANEL_STABLE
+  encoding: 2
+  outputs:
+    panel_enable_o: 1
+    bias_enable_o: 0
+    flush_enable_o: 0
+    expose_enable_o: 0
+    readout_enable_o: 0
+    aed_enable_o: 0
+- name: BACK_BIAS
+  encoding: 3
+  outputs:
+    panel_enable_o: 0
+    bias_enable_o: 1
+    flush_enable_o: 0
+    expose_enable_o: 0
+    readout_enable_o: 0
+    aed_enable_o: 0
+- name: FLUSH
+  encoding: 4
+  outputs:
+    panel_enable_o: 0
+    bias_enable_o: 0
+    flush_enable_o: 1
+    expose_enable_o: 0
+    readout_enable_o: 0
+    aed_enable_o: 0
+- name: AED_DETECT
+  encoding: 5
+  outputs:
+    panel_enable_o: 0
+    bias_enable_o: 0
+    flush_enable_o: 0
+    expose_enable_o: 0
+    readout_enable_o: 0
+    aed_enable_o: 1
+- name: EXPOSE_TIME
+  encoding: 6
+  outputs:
+    panel_enable_o: 0
+    bias_enable_o: 0
+    flush_enable_o: 0
+    expose_enable_o: 1
+    readout_enable_o: 0
+    aed_enable_o: 0
+- name: READOUT
+  encoding: 7
+  outputs:
+    panel_enable_o: 0
+    bias_enable_o: 0
+    flush_enable_o: 0
+    expose_enable_o: 0
+    readout_enable_o: 1
+    aed_enable_o: 0
 inputs:
-  - name: clk
-    width: 1
-  - name: reset_i
-    width: 1
-  # LUT RAM config inputs
-  - name: lut_wen_i
-    width: 1
-  - name: lut_write_data_i
-    width: 32 # This width will be overwritten by the generator based on lut_ram_data.yaml
-  - name: lut_rden_i
-    width: 1
-
+- name: clk
+  width: 1
+- name: reset_i
+  width: 1
+- name: lut_wen_i
+  width: 1
+- name: lut_write_data_i
+  width: 32
+- name: lut_rden_i
+  width: 1
 outputs:
-  - name: current_state_o
-    width: 3 # Same as state_encoding_width
-  - name: busy_o
-    width: 1
-  - name: sequence_done_o
-    width: 1
-  # FSM specific outputs derived from LUT (example outputs - adjust as needed)
-  - name: panel_enable_o
-    width: 1
-  - name: bias_enable_o
-    width: 1
-  - name: flush_enable_o
-    width: 1
-  - name: expose_enable_o
-    width: 1
-  - name: readout_enable_o
-    width: 1
-  - name: aed_enable_o
-    width: 1
-  # LUT RAM specific output
-  - name: lut_read_data_o
-    width: 32 # This width will be overwritten by the generator based on lut_ram_data.yaml
-  # Outputs for LUT parameters (current values)
-  - name: current_repeat_count_o
-    width: 8
-  - name: current_data_length_o
-    width: 16
-  - name: current_eof_o
-    width: 1
-  - name: current_sof_o
-    width: 1
+- name: current_state_o
+  width: 3
+- name: busy_o
+  width: 1
+- name: sequence_done_o
+  width: 1
+- name: panel_enable_o
+  width: 1
+- name: bias_enable_o
+  width: 1
+- name: flush_enable_o
+  width: 1
+- name: expose_enable_o
+  width: 1
+- name: readout_enable_o
+  width: 1
+- name: aed_enable_o
+  width: 1
+- name: lut_read_data_o
+  width: 32
+- name: current_repeat_count_o
+  width: 8
+- name: current_data_length_o
+  width: 16
+- name: current_eof_o
+  width: 1
+- name: current_sof_o
+  width: 1
+states_map:
+  RST: 0
+  IDLE: 1
+  PANEL_STABLE: 2
+  BACK_BIAS: 3
+  FLUSH: 4
+  AED_DETECT: 5
+  EXPOSE_TIME: 6
+  READOUT: 7

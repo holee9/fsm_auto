@@ -2,120 +2,112 @@
 
 module sequencer_fsm_tb;
 
-    // Testbench Signals
+    // Clock and Reset signals
     logic clk;
     logic reset_i;
-    logic lut_wen_i;
-    logic [28:0] lut_write_data_i;
-    logic lut_rden_i;
+    logic exit_signal_i; // External signal for infinite loop exit
 
-    // DUT Outputs (connected to TB wires/logics)
-    logic [2:0] current_state_o;
-    logic busy_o;
-    logic sequence_done_o;
-    logic [28:0] lut_read_data_o;
-    logic panel_enable_o;
-    logic bias_enable_o;
-    logic flush_enable_o;
-    logic expose_enable_o;
-    logic readout_enable_o;
-    logic aed_enable_o;
-    logic [7:0] current_repeat_count_o;
-    logic [15:0] current_data_length_o;
-    logic [0:0] current_eof_o;
-    logic [0:0] current_sof_o;
+    // LUT RAM interface signals
+    logic lut_wen_i; // LUT Write Enable (active high, only in RST state)
+    logic [28:0] lut_write_data_i; // Data to write to LUT RAM
+    logic lut_rden_i; // LUT Read Enable (active high, only in RST state)
+    wire [28:0] lut_read_data_o; // Data read from LUT RAM
 
-    // Instantiate Device Under Test (DUT)
-    sequencer_fsm dut (
+    // FSM Outputs
+    wire [2:0] current_state_o;
+    wire busy_o;
+    wire sequence_done_o;
+    wire panel_enable_o;
+    wire bias_enable_o;
+    wire flush_enable_o;
+    wire expose_enable_o;
+    wire readout_enable_o;
+    wire aed_enable_o;
+    wire [7:0] current_repeat_count_o;
+    wire [15:0] current_data_length_o;
+    wire [0:0] current_eof_o;
+    wire [0:0] current_sof_o;
+
+    // Instantiate FSM module
+    sequencer_fsm u_fsm (
         .clk(clk),
         .reset_i(reset_i),
+        .exit_signal_i(exit_signal_i),
         .lut_wen_i(lut_wen_i),
         .lut_write_data_i(lut_write_data_i),
         .lut_rden_i(lut_rden_i),
+        .lut_read_data_o(lut_read_data_o),
         .current_state_o(current_state_o),
         .busy_o(busy_o),
-        .sequence_done_o(sequence_done_o),
-        .lut_read_data_o(lut_read_data_o),
-        .panel_enable_o(panel_enable_o),
-        .bias_enable_o(bias_enable_o),
-        .flush_enable_o(flush_enable_o),
-        .expose_enable_o(expose_enable_o),
-        .readout_enable_o(readout_enable_o),
-        .aed_enable_o(aed_enable_o),
-        .current_repeat_count_o(current_repeat_count_o),
-        .current_data_length_o(current_data_length_o),
-        .current_eof_o(current_eof_o),
-        .current_sof_o(current_sof_o)
+        .sequence_done_o(sequence_done_o)
+        ,.panel_enable_o(panel_enable_o)
+        ,.bias_enable_o(bias_enable_o)
+        ,.flush_enable_o(flush_enable_o)
+        ,.expose_enable_o(expose_enable_o)
+        ,.readout_enable_o(readout_enable_o)
+        ,.aed_enable_o(aed_enable_o)
+        ,.current_repeat_count_o(current_repeat_count_o)
+        ,.current_data_length_o(current_data_length_o)
+        ,.current_eof_o(current_eof_o)
+        ,.current_sof_o(current_sof_o)
     );
 
     // Clock Generation
-    always #5 clk = ~clk; // 10ns period, 100MHz clock
-
-    // Main Test Sequence
     initial begin
-        clk = 1'b0;
-        reset_i = 1'b1; // Assert reset
-        lut_wen_i = 1'b0;
-        lut_rden_i = 1'b0;
-        lut_write_data_i = '0;
-
-        #100; // Hold reset for a while
-
-        // --- LUT RAM Configuration (during RST state) ---
-        $display("\n--- Initializing LUT RAM ---");
-        reset_i = 1'b1; // Ensure reset is high for LUT write
-        lut_wen_i = 1'b1; // Enable LUT write
-        lut_rden_i = 1'b0; // Disable LUT read during write
-
-        // Write LUT Entry 0x0: State=PANEL_STABLE, Repeat=5, DataLen=100, EOF=0, SOF=0
-        lut_write_data_i = {8'd5, 16'd100, 1'd0, 1'd0, 3'd2};
-        @(posedge clk); // Wait for one clock cycle for write to complete and dut.lut_addr_reg to increment
-        // Write LUT Entry 0x1: State=BACK_BIAS, Repeat=1, DataLen=0, EOF=0, SOF=0
-        lut_write_data_i = {8'd1, 16'd0, 1'd0, 1'd0, 3'd3};
-        @(posedge clk); // Wait for one clock cycle for write to complete and dut.lut_addr_reg to increment
-        // Write LUT Entry 0x2: State=FLUSH, Repeat=3, DataLen=256, EOF=0, SOF=0
-        lut_write_data_i = {8'd3, 16'd256, 1'd0, 1'd0, 3'd4};
-        @(posedge clk); // Wait for one clock cycle for write to complete and dut.lut_addr_reg to increment
-        // Write LUT Entry 0x3: State=EXPOSE_TIME, Repeat=1, DataLen=5000, EOF=0, SOF=0
-        lut_write_data_i = {8'd1, 16'd5000, 1'd0, 1'd0, 3'd6};
-        @(posedge clk); // Wait for one clock cycle for write to complete and dut.lut_addr_reg to increment
-        // Write LUT Entry 0x4: State=READOUT, Repeat=1, DataLen=4096, EOF=1, SOF=0
-        lut_write_data_i = {8'd1, 16'd4096, 1'd1, 1'd0, 3'd7};
-        @(posedge clk); // Wait for one clock cycle for write to complete and dut.lut_addr_reg to increment
-        lut_wen_i = 1'b0; // Disable LUT write
-        $display("--- LUT RAM Initialized ---\n");
-
-        // De-assert reset to start FSM operation
-        reset_i = 1'b0;
-        @(posedge clk); // Wait for FSM to transition out of RST
-
-        // --- Monitor FSM State and Outputs ---
-        $display("Time\tState\tBusy\tSeqDone\tPanel\tBias\tFlush\tExpose\tReadout\tAED\tRPT\tDATA\tEOF\tSOF\tLUT_ADDR");
-        $monitor("%0t\t%s\t%b\t%b\t%b\t%b\t%b\t%b\t%b\t%b\t%d\t%d\t%b\t%b\t%h",
-                 $time,
-                 state_name_from_encoding(current_state_o),
-                 busy_o, sequence_done_o,
-                 panel_enable_o, bias_enable_o, flush_enable_o, expose_enable_o, readout_enable_o, aed_enable_o,
-                 current_repeat_count_o, current_data_length_o, current_eof_o, current_sof_o,
-                 dut.lut_addr_reg);
-
-        #20000; // Run simulation for a substantial amount of time
-        $display("\n--- Simulation Timeout ---");
-        $finish;
+        clk = 0;
+        forever #5 clk = ~clk; // 10ns period, 100MHz clock
     end
 
-    function string state_name_from_encoding(logic [2:0] encoding);
-        case(encoding)
-            RST: state_name_from_encoding = "RST";
-            IDLE: state_name_from_encoding = "IDLE";
-            PANEL_STABLE: state_name_from_encoding = "PANEL_STABLE";
-            BACK_BIAS: state_name_from_encoding = "BACK_BIAS";
-            FLUSH: state_name_from_encoding = "FLUSH";
-            AED_DETECT: state_name_from_encoding = "AED_DETECT";
-            EXPOSE_TIME: state_name_from_encoding = "EXPOSE_TIME";
-            READOUT: state_name_from_encoding = "READOUT";
-            default: state_name_from_encoding = "UNKNOWN";
-        endcase
-    endfunction
+    // Test Scenario
+    initial begin
+        $dumpfile("sequencer_fsm_tb.vcd");
+        $dumpvars(0, {fsm_module_name}_tb);
+
+        // 1. Initial Reset
+        reset_i = 1;
+        lut_wen_i = 0;
+        lut_rden_i = 0;
+        lut_write_data_i = '0;
+        exit_signal_i = 0;
+        #20; // Hold reset for 20ns (2 clock cycles)
+
+        // 2. Configure LUT RAM (using RST state auto-increment)
+        // FSM remains in RST while configuring, lut_addr_reg auto-increments with lut_wen_i/lut_rden_i
+        lut_wen_i = 1; // Enable LUT write
+        lut_write_data_i = 29'd134742416; // Address 0x0
+        #10; // Write data and auto-increment lut_addr_reg
+        lut_write_data_i = 29'd202375208; // Address 0x1
+        #10; // Write data and auto-increment lut_addr_reg
+        lut_write_data_i = 29'd269222912; // Address 0x2
+        #10; // Write data and auto-increment lut_addr_reg
+        lut_write_data_i = 29'd402917328; // Address 0x3
+        #10; // Write data and auto-increment lut_addr_reg
+        lut_write_data_i = 29'd470025394; // Address 0x4
+        #10; // Write data and auto-increment lut_addr_reg
+        lut_wen_i = 0; // Disable LUT write
+        #10;
+
+        // 3. De-assert reset to start FSM sequence
+        reset_i = 0;
+        #10;
+        $display("\n--- FSM Sequence Started ---");
+        $display("Time\tState\tAddr\tDataLen\tRepeat\tEOF\tSOF\tBusy\tSeqDone\tExitSig");
+        for (int i = 0; i < 200; i++) begin // Run for a fixed number of cycles to observe behavior
+            $display("%-4d\t%h\t%h\t%h\t%h\t%b\t%b\t%b\t%b\t%b", 
+                $time, current_state_o, u_fsm.lut_addr_reg, u_fsm.data_length_timer, u_fsm.active_repeat_count,
+                current_eof_o, current_sof_o, busy_o, sequence_done_o, exit_signal_i);
+            if ($time == 150) begin // Example: Assert exit_signal_i at 150ns (after some sequence iterations)
+                exit_signal_i = 1;
+                $display("\n*** ASSERTING exit_signal_i ***\n");
+            end else if ($time == 160) begin
+                exit_signal_i = 0;
+                $display("\n*** DE-ASSERTING exit_signal_i ***\n");
+            end
+            #10; // Wait for next clock edge
+        end
+
+        $display("\n--- Simulation Finished ---");
+        $finish;
+    end
 
 endmodule
