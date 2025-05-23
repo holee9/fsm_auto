@@ -44,5 +44,12 @@ lut_entries:
     next_state: READOUT
     repeat_count: 1
     data_length: 40
+    eof: 0
+    sof: 0
+
+  - address: 0x05 # IDLE (End of this sequence)
+    next_state: IDLE
+    repeat_count: 1
+    data_length: 20
     eof: 1
     sof: 0

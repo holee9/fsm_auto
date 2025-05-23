@@ -128,7 +128,7 @@ class SequencerFSM:
         if self.data_length_timer == 0:
             if current_state_name == "PANEL_STABLE":
                 self.internal_sensor_stable = True
-            elif current_state_name in ["BACK_BIAS", "FLUSH", "EXPOSE_TIME", "READOUT"]:
+            elif current_state_name in ["BACK_BIAS", "FLUSH", "EXPOSE_TIME", "READOUT", "IDLE"]:
                 self.internal_task_done = True
                 if current_state_name == "READOUT":
                     self.internal_adc_ready = True # Specific task completion for READOUT
@@ -140,6 +140,11 @@ class SequencerFSM:
         
         prev_current_state_reg = self.current_state_reg
         prev_lut_addr_reg = self.lut_addr_reg
+        prev_idle_type = ""
+        if self.current_state_reg == self.state_encoding_map['IDLE']:
+            prev_params = self._get_lut_data_at_addr(self.lut_addr_reg)
+            prev_idle_type = "Programmed IDLE" if prev_params.get('next_state') == 'IDLE' else "Transition IDLE"
+
 
         next_state_reg = self.current_state_reg
         next_lut_addr_reg = self.lut_addr_reg
@@ -265,7 +270,7 @@ class SequencerFSM:
                     if self.active_repeat_count > 0:
                         self.active_repeat_count -= 1
 
-        else: # Command states (e.g., PANEL_STABLE, BACK_BIAS, FLUSH, EXPOSE_TIME, READOUT, AED_DETECT)
+        else: # Command states (e.g., PANEL_STABLE, BACK_BIAS, FLUSH, EXPOSE_TIME, READOUT, AED_DETECT, IDLE)
             if self.data_length_timer > 0:
                 self.data_length_timer -= 1
 
@@ -283,6 +288,8 @@ class SequencerFSM:
                 elif current_state_name == "EXPOSE_TIME" and self.internal_task_done:
                     is_task_done = True
                 elif current_state_name == "READOUT" and self.internal_task_done and self.internal_adc_ready:
+                    is_task_done = True
+                elif current_state_name == "IDLE" and self.internal_task_done:
                     is_task_done = True
                 elif current_state_name == "AED_DETECT" and self.internal_aed_detected:
                     is_task_done = True
@@ -309,10 +316,12 @@ class SequencerFSM:
             should_print = True # Always print when entering IDLE state
         elif current_info['state'] == 'IDLE' and current_info['current_addr'] != prev_lut_addr_reg: # Print IDLE if its address changes
             should_print = True
+        elif current_info['state'] == 'IDLE' and self.encoding_state_map.get(prev_current_state_reg) == 'IDLE' and \
+            current_info['idle_type'] != prev_idle_type:
+            should_print = True
         elif self.encoding_state_map.get(prev_current_state_reg) == 'IDLE' and current_info['state'] == 'IDLE' and \
-             (self.data_length_timer != fsm.get_display_info()['timer_A'] or self.active_repeat_count != fsm.get_display_info()['active_repeat']):
+             (self.data_length_timer != self.get_display_info()['timer_A'] or self.active_repeat_count != self.get_display_info()['active_repeat']):
              should_print = True # If staying in IDLE, print if timer or repeat count changes.
-
         
         if should_print:
             self.print_line(current_info)
@@ -329,56 +338,47 @@ class SequencerFSM:
         display_timer_A = ""
         display_eof = ""
         display_sof = ""
+        display_idle_type = ""
+
         
         if self.current_state_reg == self.state_encoding_map['RST']:
             # RST state: Addr and NextAddr are fixed to 0x00. All others blank.
             display_current_addr = 0x00
             display_next_addr = 0x00 
             # All other fields (LUT parameters and internal counters) remain blank for RST state.
+            pass # RST 상태에서 IDLE 구분 필요 없음
             
         elif self.current_state_reg == self.state_encoding_map['IDLE']:
+            # IMPORTANT: Always reload current_params from current lut_addr_reg 
+            # to ensure we have the correct LUT data for this display
+            current_lut_params = self._get_lut_data_at_addr(self.lut_addr_reg)
+            
             # Check if this IDLE state is defined as a specific command in LUT RAM
-            # by checking if the LUT entry at current_addr_reg actually points to IDLE as its next_state.
-            # This is a bit ambiguous in standard FSMs, but let's assume if the current_params
-            # at self.lut_addr_reg have 'next_state' as 'IDLE', it's a programmed IDLE.
-            # This means the *current* LUT entry defines this IDLE's behavior.
-            
-            # To handle the case where IDLE is a programmed command (e.g., for a fixed delay)
-            # We need to distinguish this from an IDLE that's just a transition state after a command.
-            
-            # Let's check the LUT entry for the *current* address (`self.lut_addr_reg`).
-            # If this LUT entry's `next_state` parameter is 'IDLE', then it's a programmed IDLE.
-            # Otherwise, it's a transient IDLE after a command finishes.
-
-            # Important: The `self.current_params` has already been loaded from `self.lut_addr_reg` in `step()`.
-            # We can use `self.current_params['next_state']` to check if the current LUT entry points to IDLE.
-            
-            is_programmed_idle_in_lut = (self.current_params.get('next_state') == 'IDLE')
+            is_programmed_idle_in_lut = (current_lut_params.get('next_state') == 'IDLE')
             
             if is_programmed_idle_in_lut:
+                display_idle_type = "Programmed IDLE"
+
                 # This is a programmed IDLE command in LUT RAM. Display its parameters.
                 display_current_addr = self.lut_addr_reg
                 
                 # The next_addr for a programmed IDLE follows its own logic.
-                # If its timer/repeat is not done, it stays at current_addr.
-                # If done, it follows its EOF or moves to next sequential.
-                
                 if self.data_length_timer > 0 or self.active_repeat_count > 0: # Still active within the IDLE command
                     display_next_addr = self.lut_addr_reg
-                elif self.current_params.get('eof', 0) == 1:
+                elif current_lut_params.get('eof', 0) == 1:
                     display_next_addr = 0x00
                 else:
                     display_next_addr = self.lut_addr_reg + 1
                 
-                display_repeat_L = self.current_params.get('repeat_count', 1)
-                display_length_L = self.current_params.get('data_length', 1)
-                display_eof = self.current_params.get('eof', 0)
-                display_sof = self.current_params.get('sof', 0)
+                display_repeat_L = current_lut_params.get('repeat_count', 1)
+                display_length_L = current_lut_params.get('data_length', 1)
+                display_eof = current_lut_params.get('eof', 0)
+                display_sof = current_lut_params.get('sof', 0)
                 
             else:
+                display_idle_type = "Transition IDLE"
+
                 # This is a transition IDLE. Addresses and LUT params are blank.
-                # 'Addr' and 'NextAddr' would refer to the *command that just finished* or *next command*.
-                # As per customer request, for transition IDLE, these should be blank.
                 display_current_addr = ""
                 display_next_addr = ""
                 # LUT parameters are also blank.
@@ -387,7 +387,8 @@ class SequencerFSM:
             display_active_repeat = self.active_repeat_count 
             display_timer_A = self.data_length_timer 
 
-        else: # All other Command states (PANEL_STABLE, BACK_BIAS, FLUSH, EXPOSE_TIME, READOUT, AED_DETECT)
+        else: 
+            # All other Command states (PANEL_STABLE, BACK_BIAS, FLUSH, EXPOSE_TIME, READOUT, AED_DETECT, IDLE)
             # In command states, display all parameters loaded from LUT RAM and internal counters.
             display_current_addr = self.lut_addr_reg
             
@@ -413,6 +414,8 @@ class SequencerFSM:
                     display_next_addr = self.lut_addr_reg + 1
             else: # Still repeating this command, so next address will be the same
                 display_next_addr = self.lut_addr_reg
+            
+            pass
 
 
         return {
@@ -425,20 +428,21 @@ class SequencerFSM:
             'length_L': display_length_L, 
             'timer_A': display_timer_A,
             'eof': display_eof,
-            'sof': display_sof
+            'sof': display_sof,
+            'idle_type': display_idle_type
         }
 
     def print_header(self):
-        print(f"{'Time':<4} | {'State':<14} | {'Addr':<4} | {'NextAddr':<8} | {'Repeat(L)':<9} | {'Repeat(A)':<11} | {'Length(L)':<9} | {'Timer(A)':<9} | {'EOF':<3} | {'SOF':<3}")
-        print("-" * 115)
+        print(f"{'Time':<4} | {'State':<14} | {'Addr':<4} | {'NextAddr':<8} | {'Repeat(L)':<9} | {'Repeat(A)':<11} | {'Length(L)':<9} | {'Timer(A)':<9} | {'EOF':<3} | {'SOF':<3} | {'Type':<15}")
+        print("-" * 135)
 
     def print_line(self, info):
-        # Use str() to handle both integers and empty strings gracefully in f-strings
-        # Format addresses with #04x or #08x if they are integers, otherwise keep as string
         formatted_current_addr = f"{info['current_addr']:#04x}" if isinstance(info['current_addr'], int) else str(info['current_addr'])
         formatted_next_addr = f"{info['next_addr']:#08x}" if isinstance(info['next_addr'], int) else str(info['next_addr'])
 
-        print(f"{info['time']:<4} | {info['state']:<14} | {formatted_current_addr:<4} | {formatted_next_addr:<8} | {str(info['repeat_L']):<9} | {str(info['active_repeat']):<11} | {str(info['length_L']):<9} | {str(info['timer_A']):<9} | {str(info['eof']):<3} | {str(info['sof']):<3}")
+        idle_type_display = info['idle_type'] if info['state'] == 'IDLE' else ""
+        
+        print(f"{info['time']:<4} | {info['state']:<14} | {formatted_current_addr:<4} | {formatted_next_addr:<8} | {str(info['repeat_L']):<9} | {str(info['active_repeat']):<11} | {str(info['length_L']):<9} | {str(info['timer_A']):<9} | {str(info['eof']):<3} | {str(info['sof']):<3} | {idle_type_display:<15}")
 
     def generate_report(self):
         report = []
