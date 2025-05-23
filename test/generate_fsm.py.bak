@@ -1,0 +1,276 @@
+import yaml
+import logging
+import os
+
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+def generate_systemverilog_fsm_with_lut_ram(fsm_config_path, lut_ram_config_path, output_file):
+    """
+    Generates a SystemVerilog FSM module based on LUT RAM.
+    - RST (state) is special for initialization.
+    - FSM starts sequence immediately after reset de-assertion.
+    - LUT RAM read/write in RST state uses auto-incrementing lut_addr_reg.
+    - Each sequence command completion transitions to IDLE.
+    - From IDLE, lut_addr_reg increments, and then transitions to the next command.
+    - Sequence automatically loops back to address 0x00 when 'eof' is detected during IDLE transition.
+    """
+    with open(fsm_config_path, 'r') as f:
+        fsm_config = yaml.safe_load(f)
+    with open(lut_ram_config_path, 'r') as f:
+        lut_ram_config = yaml.safe_load(f)
+
+    fsm_name = fsm_config['fsm_name']
+    state_width = fsm_config['state_encoding_width']
+    states_data = fsm_config['states']
+    
+    # Create a mapping for state names to their encodings
+    state_encoding_map = {state['name']: state['encoding'] for state in states_data}
+    
+    # Safely get the description, providing an empty string if not present
+    state_comment_map = {state['name']: state.get('description', '') for state in states_data}
+
+
+    # Extract LUT RAM configuration
+    address_width = lut_ram_config['lut_ram_config']['address_width']
+    param_fields = lut_ram_config['lut_ram_config']['param_fields']
+    lut_entries = lut_ram_config['lut_entries']
+
+    # Determine max widths for data_length and repeat_count from param_fields
+    data_length_width = 0
+    repeat_count_width = 0
+    for field in param_fields:
+        if field['name'] == 'data_length':
+            data_length_width = field['width']
+        if field['name'] == 'repeat_count':
+            repeat_count_width = field['width']
+
+    # Generate SystemVerilog code
+    sv_code_lines = []
+
+    sv_code_lines.append(f"`timescale 1ns / 1ps")
+    sv_code_lines.append(f"module {fsm_name} (")
+    sv_code_lines.append(f"    input  logic                   clk,")
+    sv_code_lines.append(f"    input  logic                   rst_n,")
+    sv_code_lines.append(f"    input  logic                   fsm_start_i, // Start sequence trigger (active high)")
+    sv_code_lines.append(f"    input  logic                   current_task_done_i, // Input from external task/timer to signal completion of current command")
+    sv_code_lines.append(f"    input  logic                   exit_signal_i, // External signal to force exit from active_repeat_count loop (e.g., from sensor)")
+    sv_code_lines.append(f"    output logic [{state_width-1}:0]  current_state_o,")
+    sv_code_lines.append(f"    output logic [{address_width-1}:0] lut_addr_o,")
+    sv_code_lines.append(f"    output logic                   lut_read_en_o,")
+    sv_code_lines.append(f"    input  logic [{state_width-1}:0]  lut_next_state_i,") # Re-added based on previous discussion
+    
+    # Add input ports for LUT parameters
+    for field in param_fields:
+        sv_code_lines.append(f"    input  logic [{field['width']-1}:0]  lut_{field['name']}_i,")
+    sv_code_lines.append(f"    output logic                   sequence_done_o // Asserted when FSM completes a full sequence (based on EOF and IDLE transition)")
+    sv_code_lines.append(f");")
+    sv_code_lines.append(f"")
+
+    # State parameter definitions
+    sv_code_lines.append(f"    // FSM State Parameters")
+    for state in states_data:
+        # Use .get() with a default empty string for 'description' to prevent KeyError
+        description = state.get('description', '') 
+        sv_code_lines.append(f"    localparam logic [{state_width-1}:0] {state['name']} = {state_width}'b{state['encoding']}; // {description}")
+    sv_code_lines.append(f"")
+
+    # Internal registers
+    sv_code_lines.append(f"    // FSM Internal Registers")
+    sv_code_lines.append(f"    logic [{state_width-1}:0]  current_state_reg;")
+    sv_code_lines.append(f"    logic [{address_width-1}:0] lut_addr_reg;")
+    sv_code_lines.append(f"    logic [{repeat_count_width-1}:0] active_repeat_count;")
+    sv_code_lines.append(f"    logic [{data_length_width-1}:0] data_length_timer;")
+    sv_code_lines.append(f"    logic                       sequence_done_reg;") # Register for sequence_done_o
+
+    sv_code_lines.append(f"")
+
+    # Assign outputs
+    sv_code_lines.append(f"    // Output Assignments")
+    sv_code_lines.append(f"    assign current_state_o = current_state_reg;")
+    sv_code_lines.append(f"    assign lut_addr_o = lut_addr_reg;")
+    sv_code_lines.append(f"    assign lut_read_en_o = (current_state_reg == IDLE || current_state_reg == RST); // Read LUT at IDLE for next command or at RST for initial command")
+    sv_code_lines.append(f"    assign sequence_done_o = sequence_done_reg;")
+    sv_code_lines.append(f"")
+
+    # FSM Logic (always_ff block)
+    sv_code_lines.append(f"    always_ff @(posedge clk or negedge rst_n) begin")
+    sv_code_lines.append(f"        if (!rst_n) begin")
+    sv_code_lines.append(f"            current_state_reg     <= RST;")
+    sv_code_lines.append(f"            lut_addr_reg          <= {address_width}'d0;")
+    sv_code_lines.append(f"            active_repeat_count   <= {repeat_count_width}'d0;")
+    sv_code_lines.append(f"            data_length_timer     <= {data_length_width}'d0;")
+    sv_code_lines.append(f"            sequence_done_reg     <= 1'b0;")
+    sv_code_lines.append(f"        end else begin")
+    sv_code_lines.append(f"            // Default next state is current state (holds state)")
+    sv_code_lines.append(f"            sequence_done_reg <= 1'b0; // Default de-assert")
+    sv_code_lines.append(f"            ")
+    sv_code_lines.append(f"            // data_length_timer and active_repeat_count logic")
+    sv_code_lines.append(f"            if (data_length_timer > 0) begin")
+    sv_code_lines.append(f"                data_length_timer <= data_length_timer - 1;")
+    sv_code_lines.append(f"            end")
+    sv_code_lines.append(f"")
+    sv_code_lines.append(f"            case (current_state_reg)")
+    sv_code_lines.append(f"                RST : begin")
+    sv_code_lines.append(f"                    if (fsm_start_i) begin")
+    sv_code_lines.append(f"                        current_state_reg   <= lut_next_state_i; // Move to the first command state (from LUT RAM)")
+    sv_code_lines.append(f"                        active_repeat_count <= lut_repeat_count_i;")
+    sv_code_lines.append(f"                        data_length_timer   <= lut_data_length_i;")
+    sv_code_lines.append(f"                    end")
+    sv_code_lines.append(f"                end")
+    sv_code_lines.append(f"")
+    
+    # Generate case for each state from fsm_config, excluding RST and IDLE for now
+    for state in states_data:
+        if state['name'] not in ["RST", "IDLE"]:
+            # Use .get() with a default empty string for 'comment' in the code comment
+            comment = state_comment_map.get(state['name'], '')
+            sv_code_lines.append(f"                {state['name']} : begin // {comment}")
+            sv_code_lines.append(f"                    // A command state. Stays in this state until 'data_length_timer' is 0")
+            sv_code_lines.append(f"                    // and external 'current_task_done_i' is asserted.")
+            sv_code_lines.append(f"                    if (data_length_timer == 0 && current_task_done_i) begin")
+            sv_code_lines.append(f"                        current_state_reg <= IDLE;")
+            sv_code_lines.append(f"                    end")
+            sv_code_lines.append(f"                end")
+            sv_code_lines.append(f"")
+
+    sv_code_lines.append(f"                IDLE : begin // Transition state after a command completion")
+    sv_code_lines.append(f"                    if (lut_eof_i) begin // Current command was the end of the sequence")
+    sv_code_lines.append(f"                        sequence_done_reg <= 1'b1; // Signal sequence completion")
+    sv_code_lines.append(f"                        // If we are at the end of the sequence, loop back to address 0x00")
+    sv_code_lines.append(f"                        if (active_repeat_count > 0 && active_repeat_count != {repeat_count_width}'d1) begin // '0' for infinite, '1' for no more repeats in this cycle")
+    sv_code_lines.append(f"                            if (exit_signal_i) begin // External exit signal overrides repeat")
+    sv_code_lines.append(f"                                lut_addr_reg        <= {address_width}'d0; // Reset address")
+    sv_code_lines.append(f"                                current_state_reg   <= lut_next_state_i; // Go to next state from LUT 0 (from LUT RAM)")
+    sv_code_lines.append(f"                                active_repeat_count <= {repeat_count_width}'d0; // Reset repeat count if exited by signal")
+    sv_code_lines.append(f"                                data_length_timer   <= lut_data_length_i; // Load data_length for the new state")
+    sv_code_lines.append(f"                            end else begin")
+    sv_code_lines.append(f"                                active_repeat_count <= active_repeat_count - 1; // Decrement repeat count")
+    sv_code_lines.append(f"                                lut_addr_reg        <= {address_width}'d0; // Loop back to start")
+    sv_code_lines.append(f"                                current_state_reg   <= lut_next_state_i; // Go to next state from LUT 0 (from LUT RAM)")
+    sv_code_lines.append(f"                                data_length_timer   <= lut_data_length_i; // Load data_length for the new state")
+    sv_code_lines.append(f"                            end")
+    sv_code_lines.append(f"                        end else begin // No more repeats or infinite (0) without exit signal, or last repeat done")
+    sv_code_lines.append(f"                            // Transition to the first command at address 0x00 and reset repeat count")
+    sv_code_lines.append(f"                            lut_addr_reg        <= {address_width}'d0;")
+    sv_code_lines.append(f"                            current_state_reg   <= lut_next_state_i; // Go to next state from LUT 0 (from LUT RAM)")
+    sv_code_lines.append(f"                            active_repeat_count <= lut_repeat_count_i; // Reset repeat count for the new sequence")
+    sv_code_lines.append(f"                            data_length_timer   <= lut_data_length_i; // Load data_length for the new state")
+    sv_code_lines.append(f"                        end")
+    sv_code_lines.append(f"                    end else begin // Current command was NOT the end of the sequence")
+    sv_code_lines.append(f"                        // Increment LUT address and move to the next command")
+    sv_code_lines.append(f"                        lut_addr_reg        <= lut_addr_reg + 1'b1;")
+    sv_code_lines.append(f"                        current_state_reg   <= lut_next_state_i; // Go to next state from the incremented LUT address (from LUT RAM)")
+    sv_code_lines.append(f"                        active_repeat_count <= lut_repeat_count_i; // Load repeat count for the new command")
+    sv_code_lines.append(f"                        data_length_timer   <= lut_data_length_i; // Load data_length for the new command")
+    sv_code_lines.append(f"                    end")
+    sv_code_lines.append(f"                end")
+    sv_code_lines.append(f"")
+    sv_code_lines.append(f"                default : begin // Should not happen in a well-defined FSM")
+    sv_code_lines.append(f"                    current_state_reg <= IDLE;")
+    sv_code_lines.append(f"                end")
+    sv_code_lines.append(f"            endcase")
+    sv_code_lines.append(f"        end")
+    sv_code_lines.append(f"    end")
+    sv_code_lines.append(f"")
+
+    sv_code_lines.append(f"endmodule")
+
+    with open(output_file, 'w') as f:
+        f.write("\n".join(sv_code_lines))
+    logging.info(f"SystemVerilog FSM generated successfully: {output_file}")
+
+
+def generate_mermaid_fsm_diagram(fsm_config_path, lut_ram_config_path, output_file):
+    """
+    Generates a Mermaid FSM state diagram from FSM configuration and LUT RAM data.
+    """
+    with open(fsm_config_path, 'r') as f:
+        fsm_config = yaml.safe_load(f)
+    with open(lut_ram_config_path, 'r') as f:
+        lut_ram_config = yaml.safe_load(f)
+
+    states_data = fsm_config['states']
+    
+    # Create a mapping for state names to their comments (using 'description' if available)
+    state_comment_map = {state['name']: state.get('description', '') for state in states_data}
+
+    mermaid_lines = []
+    mermaid_lines.append("```mermaid")
+    mermaid_lines.append("stateDiagram-v2")
+    
+    # Add states
+    for state in states_data:
+        # Use .get() with a default empty string for 'description'
+        description = state.get('description', '')
+        mermaid_lines.append(f"    {state['name']} : {description}")
+
+    # Add transitions
+    # RST state transitions
+    mermaid_lines.append(f"    RST --> IDLE : fsm_start_i / load first command (addr 0x00)")
+    
+    # Command states (PANEL_STABLE, BACK_BIAS, FLUSH, EXPOSE_TIME, READOUT) to IDLE
+    for state in states_data:
+        if state['name'] not in ["RST", "IDLE"]:
+            mermaid_lines.append(f"    {state['name']} --> IDLE : data_length_timer == 0 && current_task_done_i")
+
+    # IDLE state transitions based on lut_eof_i, repeat_count, and exit_signal_i
+    # Transition for EOF (loop back to 0x00)
+    mermaid_lines.append(f"    IDLE --> IDLE : lut_eof_i && (active_repeat_count > 1 || active_repeat_count == 0) && !exit_signal_i / Decrement active_repeat_count, sequence_done_o=1, lut_addr_reg=0x00, load next (addr 0x00)")
+    mermaid_lines.append(f"    IDLE --> IDLE : lut_eof_i && (active_repeat_count > 1 || active_repeat_count == 0) && exit_signal_i / Reset active_repeat_count, sequence_done_o=1, lut_addr_reg=0x00, load next (addr 0x00)")
+    mermaid_lines.append(f"    IDLE --> IDLE : lut_eof_i && active_repeat_count == 1 / Reset active_repeat_count, sequence_done_o=1, lut_addr_reg=0x00, load next (addr 0x00)")
+
+    # Transition for Non-EOF (increment address)
+    mermaid_lines.append(f"    IDLE --> IDLE : !lut_eof_i / Increment lut_addr_reg, load next command")
+
+
+    # Notes for detailed logic
+    mermaid_lines.append(f"")
+    mermaid_lines.append(f"    note right of RST")
+    mermaid_lines.append(f"        FSM waits in RST state for 'fsm_start_i'.")
+    mermaid_lines.append(f"        Upon 'fsm_start_i' assertion, it transitions to the state defined by LUT address 0x00.")
+    mermaid_lines.append(f"        `active_repeat_count` and `data_length_timer` are loaded from LUT 0x00.")
+    mermaid_lines.append(f"    end note")
+
+    mermaid_lines.append(f"    note right of PANEL_STABLE")
+    mermaid_lines.append(f"        These are command execution states.")
+    mermaid_lines.append(f"        The FSM stays in the current command state until `data_length_timer` reaches 0")
+    mermaid_lines.append(f"        AND `current_task_done_i` is asserted by the external task/timer.")
+    mermaid_lines.append(f"        `data_length_timer` decrements each clock cycle when > 0.")
+    mermaid_lines.append(f"        Upon completion, it transitions to `IDLE`.")
+    mermaid_lines.append(f"    end note")
+
+    mermaid_lines.append(f"    note right of IDLE")
+    mermaid_lines.append(f"        The FSM transitions to IDLE after a command (state) completes.")
+    mermaid_lines.append(f"        In IDLE, the FSM reads the LUT RAM for the next command (using `lut_read_en_o`).")
+    mermaid_lines.append(f"        - If `lut_eof_i` is asserted (meaning the *previous* command was the end of the sequence):")
+    mermaid_lines.append(f"            - `sequence_done_o` is asserted for one cycle.")
+    mermaid_lines.append(f"            - If `active_repeat_count` is > 1 (or 0 for infinite repeat) and `exit_signal_i` is not asserted:")
+    mermaid_lines.append(f"                - `active_repeat_count` decrements (if not infinite).")
+    mermaid_lines.append(f"                - FSM loops back to the beginning of the sequence (`lut_addr_reg` is reset to `0x00`).")
+    mermaid_lines.append(f"                - FSM transitions to the state defined by `lut_ram[0x00]`, and `data_length_timer` is loaded.")
+    mermaid_lines.append(f"            - If `active_repeat_count` is 1 (last repeat) or `exit_signal_i` is asserted:")
+    mermaid_lines.append(f"                - `active_repeat_count` is reset (or remains 0 for infinite).")
+    mermaid_lines.append(f"                - FSM loops back to `0x00` and transitions to the state defined by `lut_ram[0x00]`, loading `data_length_timer` and `active_repeat_count` from LUT 0x00.")
+    mermaid_lines.append(f"        - If `lut_eof_i` is NOT asserted (meaning there are more commands in the sequence):")
+    mermaid_lines.append(f"            - `lut_addr_reg` increments.")
+    mermaid_lines.append(f"            - FSM transitions to the state defined by `lut_ram[new_lut_addr_reg]`, loading `data_length_timer` and `active_repeat_count` for this new command.")
+    mermaid_lines.append(f"    end note")
+
+    mermaid_lines.append("```")
+
+    with open(output_file, 'w') as f:
+        f.write("\n".join(mermaid_lines))
+    logging.info(f"Mermaid State Diagram generated successfully: {output_file}")
+
+
+if __name__ == "__main__":
+    FSM_CONFIG_PATH = "fsm_config.yaml"
+    LUT_RAM_DATA_PATH = "fsm_lut_ram_data.yaml"
+    SV_OUTPUT_PATH = "sequencer_fsm.sv"
+    MERMAID_OUTPUT_PATH = "fsm_diagram.md"
+
+    logging.info(f"Generating SystemVerilog FSM to {SV_OUTPUT_PATH}...")
+    generate_systemverilog_fsm_with_lut_ram(FSM_CONFIG_PATH, LUT_RAM_DATA_PATH, SV_OUTPUT_PATH)
+
+    logging.info(f"Generating Mermaid FSM diagram to {MERMAID_OUTPUT_PATH}...")
+    generate_mermaid_fsm_diagram(FSM_CONFIG_PATH, LUT_RAM_DATA_PATH, MERMAID_OUTPUT_PATH)
