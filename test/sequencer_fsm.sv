@@ -1,4 +1,5 @@
 `timescale 1ns / 1ps
+
 module sequencer_fsm (
     input  logic                   clk,
     input  logic                   reset_i,
@@ -21,15 +22,20 @@ module sequencer_fsm (
     output logic [0:0]             current_sof_o
 );
 
+    // Internal LUT RAM for simulation and to drive 'lut_read_data_o'
+    localparam LUT_DEPTH = (2**8);
+    localparam LUT_DATA_WIDTH = 29;
+    (* ram_init_file = "init.mem" *) logic [LUT_DATA_WIDTH-1:0] internal_lut_ram [0:LUT_DEPTH-1];
+
     // FSM State Parameters
-    localparam logic [2:0] RST = 3'b0; // 
-    localparam logic [2:0] IDLE = 3'b1; // 
-    localparam logic [2:0] PANEL_STABLE = 3'b2; // 
-    localparam logic [2:0] BACK_BIAS = 3'b3; // 
-    localparam logic [2:0] FLUSH = 3'b4; // 
-    localparam logic [2:0] AED_DETECT = 3'b5; // 
-    localparam logic [2:0] EXPOSE_TIME = 3'b6; // 
-    localparam logic [2:0] READOUT = 3'b7; // 
+    localparam logic [2:0] RST = 3'd0; // 
+    localparam logic [2:0] IDLE = 3'd1; // 
+    localparam logic [2:0] PANEL_STABLE = 3'd2; // 
+    localparam logic [2:0] BACK_BIAS = 3'd3; // 
+    localparam logic [2:0] FLUSH = 3'd4; // 
+    localparam logic [2:0] AED_DETECT = 3'd5; // 
+    localparam logic [2:0] EXPOSE_TIME = 3'd6; // 
+    localparam logic [2:0] READOUT = 3'd7; // 
 
     // FSM Internal Registers
     logic [2:0]  current_state_reg;
@@ -48,12 +54,13 @@ module sequencer_fsm (
     logic [15:0] read_data_length;
     logic [0:0]     read_eof;
     logic [0:0]     read_sof;
+    logic [28:0] lut_read_data_int;
 
-    assign read_next_state  = lut_read_data_o[2:0];
-    assign read_repeat_count = lut_read_data_o[10:3];
-    assign read_data_length = lut_read_data_o[26:11];
-    assign read_eof         = lut_read_data_o[27:27];
-    assign read_sof         = lut_read_data_o[28:28];
+    assign read_next_state  = lut_read_data_int[2:0];
+    assign read_repeat_count = lut_read_data_int[10:3];
+    assign read_data_length = lut_read_data_int[26:11];
+    assign read_eof         = lut_read_data_int[27:27];
+    assign read_sof         = lut_read_data_int[28:28];
 
     // Output Assignments
     assign current_state_o = current_state_reg;
@@ -69,7 +76,7 @@ module sequencer_fsm (
     assign flush_enable_o   = (current_state_reg == FLUSH);
     assign expose_enable_o  = (current_state_reg == EXPOSE_TIME);
     assign readout_enable_o = (current_state_reg == READOUT);
-    assign aed_enable_o     = (current_state_reg == READOUT); // Assuming AED active during readout if no specific state
+    assign aed_enable_o     = (current_state_reg == AED_DETECT);
 
     always_ff @(posedge clk or posedge reset_i) begin
         if (reset_i) begin // Active high reset
@@ -80,6 +87,7 @@ module sequencer_fsm (
             sequence_done_reg     <= 1'b0;
             current_eof_reg       <= 1'b0;
             current_sof_reg       <= 1'b0;
+            lut_read_data_o       <= 29'd0; // Reset output data
         end else begin
             sequence_done_reg <= 1'b0; // Default de-assert sequence done
             current_sof_reg   <= 1'b0; // Default de-assert current SOF after one cycle
@@ -91,11 +99,11 @@ module sequencer_fsm (
 
             case (current_state_reg)
                 RST : begin
-                    // While in RST, lut_addr_reg auto-increments for external LUT RAM R/W operations.
-                    // The actual sequencing starts when 'reset_i' goes low (handled in if (!reset_i) block).
-                    if (lut_wen_i || lut_rden_i) begin
-                        lut_addr_reg <= lut_addr_reg + 1'b1; // Auto-increment address for config
-                    end
+
+                    // if (lut_wen_i || lut_rden_i) begin
+                    //     lut_addr_reg <= lut_addr_reg + 1'b1; // Auto-increment address for config
+                    // end
+
                     // Transition out of RST immediately after reset de-assertion to the first command
                     // Parameters for address 0x00 should be available on lut_read_data_o at this point.
                     current_state_reg   <= read_next_state; // Transition to first command state based on lut_read_data_o (for addr 0x00)
@@ -103,7 +111,12 @@ module sequencer_fsm (
                     data_length_timer   <= read_data_length;
                     current_eof_reg     <= read_eof;
                     current_sof_reg     <= read_sof; // Assert SOF for the very first command (from LUT 0x00)
-                    lut_addr_reg        <= 8'd1; // Prepare for next address (0x01) for the second command
+                    // lut_addr_reg        <= 8'd1; // Prepare for next address (0x01) for the second command
+                    lut_addr_reg        <= 8'd0; // Prepare for next address (0x01) for the second command
+                    
+                    if (data_length_timer == 0) begin
+                        current_state_reg <= IDLE;
+                    end
                 end
 
                 PANEL_STABLE : begin // 
@@ -201,29 +214,30 @@ module sequencer_fsm (
         end
     end
 
-    // Internal LUT RAM for simulation and to drive 'lut_read_data_o'
-    localparam LUT_DEPTH = (2**8);
-    localparam LUT_DATA_WIDTH = 29;
-    logic [LUT_DATA_WIDTH-1:0] internal_lut_ram [0:LUT_DEPTH-1];
-
     // Combinatorial assignment for lut_read_data_o (FSM's output representing data from current lut_addr_reg)
-    assign lut_read_data_o = internal_lut_ram[lut_addr_reg];
-
+    assign lut_read_data_int = internal_lut_ram[lut_addr_reg];
+    
     // Logic to write to internal LUT RAM (controlled by lut_wen_i)
     always_ff @(posedge clk) begin
         if (current_state_reg == RST && lut_wen_i) begin
             internal_lut_ram[lut_addr_reg] <= lut_write_data_i;
+        end else if (current_state_reg == RST && lut_rden_i) begin
+            lut_read_data_o <= internal_lut_ram[lut_addr_reg];
+        end
+
+        if (current_state_reg == RST) begin
+            if (lut_wen_i || lut_rden_i) begin
+                lut_addr_reg <= lut_addr_reg + 1'b1; // Auto-increment address for config
+            end
         end
     end
 
-    // Initialize internal LUT RAM with provided entries (Blocking assignments for initial block)
+    // LUT RAM initialization (for simulation purposes)
     initial begin
-        internal_lut_ram[0] = 3'b28'd216'd501'b01'b0;
-        internal_lut_ram[1] = 3'b38'd316'd101'b01'b0;
-        internal_lut_ram[2] = 3'b48'd216'd301'b01'b0;
-        internal_lut_ram[3] = 3'b68'd116'd501'b01'b0;
-        internal_lut_ram[4] = 3'b78'd116'd401'b01'b0;
-        internal_lut_ram[5] = 3'b18'd116'd201'b11'b0;
+        integer i;
+        for (i = 0; i < LUT_DEPTH; i = i + 1) begin
+            internal_lut_ram[i] = '0;
+        end
     end
 
 endmodule
