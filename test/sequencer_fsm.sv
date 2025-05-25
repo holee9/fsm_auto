@@ -1,11 +1,13 @@
 `timescale 1ns / 1ps
 
 module sequencer_fsm (
+    // input ports
     input  logic                   clk,
     input  logic                   reset_i,
     input  logic                   lut_wen_i, // LUT Write Enable (active high, only in RST state)
     input  logic [28:0]            lut_write_data_i, // Data to write to LUT RAM
     input  logic                   lut_rden_i, // LUT Read Enable (active high, only in RST state)
+    // output ports
     output logic [28:0]            lut_read_data_o, // Data read from LUT RAM (FSM outputs its requested address's data)
     output logic [2:0]             current_state_o,
     output logic                   busy_o,

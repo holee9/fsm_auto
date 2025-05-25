@@ -43,3 +43,5 @@ test/fsm_ctrl/fsm_ctrl.sim/sim_1/behav/xsim/xsim.dir/xil_defaultlib/glbl.sdb
 test/fsm_ctrl/fsm_ctrl.sim/sim_1/behav/xsim/xsim.dir/xil_defaultlib/sequencer_fsm_tb.sdb
 test/fsm_ctrl/fsm_ctrl.sim/sim_1/behav/xsim/xsim.dir/xil_defaultlib/sequencer_fsm.sdb
 test/fsm_ctrl/fsm_ctrl.sim/sim_1/behav/xsim/xsim.dir/xil_defaultlib/xil_defaultlib.rlx
+test/fsm_ctrl/sequencer_fsm_tb_behav.wcfg
+test/fsm_ctrl/fsm_ctrl.sim/sim_1/behav/xsim/xsim.dir/sequencer_fsm_tb_behav/xsimSettings.ini
