@@ -7,9 +7,11 @@ module sequencer_fsm_tb();
     logic                   clk;
     logic                   reset_i;
     logic                   lut_wen_i;
-    logic [28:0]            lut_write_data_i;
+    logic [36:0]            lut_write_data_i;
     logic                   lut_rden_i;
-    wire  [28:0]            lut_read_data_o;
+    logic                   config_done_i;
+    logic                   exit_signal_i;
+    wire  [36:0]            lut_read_data_o;
     wire  [2:0]             current_state_o;
     wire  logic             busy_o;
     wire  logic             sequence_done_o;
@@ -41,6 +43,8 @@ module sequencer_fsm_tb();
         .lut_wen_i(lut_wen_i),
         .lut_write_data_i(lut_write_data_i),
         .lut_rden_i(lut_rden_i),
+        .config_done_i(config_done_i),
+        .exit_signal_i(exit_signal_i),
         .lut_read_data_o(lut_read_data_o),
         .current_state_o(current_state_o),
         .busy_o(busy_o),
@@ -59,14 +63,16 @@ module sequencer_fsm_tb();
 
     always #(CLOCK_PERIOD / 2) clk = ~clk;
 
-    function automatic logic [28:0] pack_lut_entry(
+    function automatic logic [36:0] pack_lut_entry(
         input logic [2:0] next_state_in,
         input logic [7:0] repeat_count_in,
         input logic [15:0] data_length_in,
         input logic [0:0] eof_in,
-        input logic [0:0] sof_in
+        input logic [0:0] sof_in,
+        input logic [7:0] next_address_in
         );
-        pack_lut_entry = (sof_in         << 28) |
+        pack_lut_entry = (next_address_in << 29) |
+                        (sof_in         << 28) |
                         (eof_in         << 27) |
                         (data_length_in << 11) |
                         (repeat_count_in << 3) |
@@ -106,41 +112,83 @@ module sequencer_fsm_tb();
         clk = 1'b0;
         reset_i = 1'b1;
         lut_wen_i = 1'b0;
-        lut_write_data_i = 29'd0;
+        lut_write_data_i = 37'd0;
         lut_rden_i = 1'b0;
+        config_done_i = 1'b1;
+        exit_signal_i = 1'b0;
 
         repeat(2) @(posedge clk);
-        reset_i = 1'b0;
+        #4 ; reset_i = 1'b0;
         @(posedge clk);
 
 
         // Simulate loading LUT RAM via write port in RST state
-        reset_i = 1'b1;
+        #4 ; reset_i = 1'b1;
         repeat(4) @(posedge clk);
+        config_done_i = 1'b0;
 
-        // reset_i = 1'b0;
-        // @(posedge clk);
+        #4 ; reset_i = 1'b0;
+        @(posedge clk);
 
         lut_wen_i = 1'b1;
 
-        lut_write_data_i = pack_lut_entry(PANEL_STABLE, 8'd2, 16'd50, 1'b0, 1'b0);
+        // state, repeat, len, eof, sof, next_addr
+
+        lut_write_data_i = pack_lut_entry(PANEL_STABLE, 8'd0, 16'd5, 1'b0, 1'b0, 8'd1);
         @(posedge clk);
-        lut_write_data_i = pack_lut_entry(BACK_BIAS, 8'd3, 16'd10, 1'b0, 1'b0);
+        lut_write_data_i = pack_lut_entry(BACK_BIAS, 8'd3, 16'd10, 1'b0, 1'b0, 8'd2);
         @(posedge clk);
-        lut_write_data_i = pack_lut_entry(FLUSH, 8'd2, 16'd30, 1'b0, 1'b0);
+        lut_write_data_i = pack_lut_entry(FLUSH, 8'd2, 16'd20, 1'b0, 1'b0, 8'd3);
         @(posedge clk);
-        lut_write_data_i = pack_lut_entry(EXPOSE_TIME, 8'd1, 16'd50, 1'b0, 1'b0);
+        lut_write_data_i = pack_lut_entry(BACK_BIAS, 8'd3, 16'd10, 1'b0, 1'b0, 8'd4);
         @(posedge clk);
-        lut_write_data_i = pack_lut_entry(READOUT, 8'd1, 16'd40, 1'b0, 1'b0);
+        lut_write_data_i = pack_lut_entry(FLUSH, 8'd2, 16'd20, 1'b0, 1'b0, 8'd5);
         @(posedge clk);
-        lut_write_data_i = pack_lut_entry(IDLE, 8'd1, 16'd20, 1'b1, 1'b0);
+        lut_write_data_i = pack_lut_entry(EXPOSE_TIME, 8'd0, 16'd50, 1'b0, 1'b0, 8'd6);
         @(posedge clk);
+        lut_write_data_i = pack_lut_entry(READOUT, 8'd0, 16'd40, 1'b1, 1'b0, 8'd7);
+        @(posedge clk);
+        lut_write_data_i = pack_lut_entry(IDLE, 8'd1, 16'd1, 1'b0, 1'b0, 8'd5);
+        @(posedge clk);
+
+        lut_write_data_i = pack_lut_entry(EXPOSE_TIME, 8'd0, 16'd50, 1'b0, 1'b0, 8'd9);
+        @(posedge clk);
+        lut_write_data_i = pack_lut_entry(READOUT, 8'd0, 16'd40, 1'b1, 1'b0, 8'd10);
+        @(posedge clk);
+
+        lut_write_data_i = pack_lut_entry(BACK_BIAS, 8'd0, 16'd10, 1'b0, 1'b0, 8'd11);
+        @(posedge clk);
+        lut_write_data_i = pack_lut_entry(FLUSH, 8'd1, 16'd20, 1'b1, 1'b0, 8'd12);
+        @(posedge clk);
+        lut_write_data_i = pack_lut_entry(IDLE, 8'd1, 16'd1, 1'b0, 1'b0, 8'd10);
+        @(posedge clk);
+
+        lut_write_data_i = pack_lut_entry(EXPOSE_TIME, 8'd0, 16'd50, 1'b0, 1'b0, 8'd14);
+        @(posedge clk);
+        lut_write_data_i = pack_lut_entry(READOUT, 8'd0, 16'd40, 1'b0, 1'b0, 8'd10);
+        @(posedge clk);
+
 
         lut_wen_i = 1'b0;
         repeat(2) @(posedge clk);
 
-        reset_i = 1'b0;
-        @(posedge clk);
+        config_done_i = 1'b1;
+        #10;
+
+        repeat(500) @(posedge clk);
+        exit_signal_i = 1'b1;
+
+        wait (sequence_done_o == 1'b1);
+        $display("Sequence completed successfully.");
+        exit_signal_i = 1'b0;
+
+        repeat(300) @(posedge clk);
+        exit_signal_i = 1'b1;
+
+        wait (sequence_done_o == 1'b1);
+        $display("Sequence completed successfully.");
+        exit_signal_i = 1'b0;
+
 
         // Monitor and simulate sequence for a duration
         repeat(5000) @(posedge clk);
@@ -156,6 +204,13 @@ module sequencer_fsm_tb();
                  $time, current_state_o, busy_o, sequence_done_o,
                  dut.lut_addr_reg, current_repeat_count_o, current_data_length_o,
                  current_eof_o, current_sof_o);
+    end
+
+    initial begin
+        $display("Checking LUT RAM initial values:");
+        for (int i = 0; i < 6; i++) begin
+            $display("LUT RAM[%0d] = %h", i, dut.internal_lut_ram[i]);
+        end
     end
 
 endmodule

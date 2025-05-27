@@ -45,3 +45,4 @@ test/fsm_ctrl/fsm_ctrl.sim/sim_1/behav/xsim/xsim.dir/xil_defaultlib/sequencer_fs
 test/fsm_ctrl/fsm_ctrl.sim/sim_1/behav/xsim/xsim.dir/xil_defaultlib/xil_defaultlib.rlx
 test/fsm_ctrl/sequencer_fsm_tb_behav.wcfg
 test/fsm_ctrl/fsm_ctrl.sim/sim_1/behav/xsim/xsim.dir/sequencer_fsm_tb_behav/xsimSettings.ini
+test/fsm_ctrl/fsm_ctrl.sim/sim_1/behav/xsim/compile.log
