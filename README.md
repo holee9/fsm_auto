@@ -1,44 +1,67 @@
-# fsm_auto
-fsm fpga 설계 자동화
+# FPGA Sequencer FSM Generator and Simulator
 
-상태 (State)	설명	3-bit 인코딩
-IDLE	대기 상태. 다음 시퀀스를 LUT RAM에서 읽어 판단.	3'b000
-RST	시스템 리셋 또는 초기화 작업 수행.	3'b001
-BACK_BIAS	백-바이어스 인가/조정.	3'b010
-FLUSH	이전 데이터 또는 잔류 전하 플러시.	3'b011
-EXPOSE_TIME	이미지 노출 시간 제어 (셔터 등).	3'b100
-READOUT	센서에서 데이터 읽기.	3'b101
-AED_DETECT	AED (Automatic Exposure Detection) 감지 로직.	3'b110
-PANEL_STABLE	패널 안정화 대기.	3'b111
+## Overview
 
-비트 폭을 할당합니다. 이 값들은 LUT RAM에 다음 상태와 함께 저장됩니다.
+This project provides tools to define, simulate, and generate hardware description code for a Finite State Machine (FSM) based sequencer. The behavior of the FSM and the data for its Look-Up Table (LUT) RAM are configured through YAML files. The main script can:
 
-반복 횟수 (repeat_count): 특정 작업을 몇 번 반복할지 지정합니다.
-예: 8비트 (2 
-8
- =256회 반복 가능)
-데이터 길이 (data_length): 읽거나 처리할 데이터의 길이/크기를 지정합니다.
-예: 16비트 (2 
-16
- =65536 길이)
-EOF (End Of Frame): 프레임 종료를 나타내는 플래그.
-예: 1비트 (0 또는 1)
-SOF (Start Of Frame): 프레임 시작을 나타내는 플래그.
-예: 1비트 (0 또는 1)
-총 파라미터 비트 폭: 8+16+1+1=26 비트
+1.  Simulate the FSM's behavior in Python.
+2.  Generate SystemVerilog HDL code for the FSM, suitable for FPGA synthesis.
+3.  Generate a Mermaid state diagram for visualization of the FSM.
 
-파라미터들은 하나의 param_value 필드로 묶어 LUT RAM에 저장
+## Core Components
 
-LUT RAM의 각 엔트리는 IDLE 상태에서 특정 **명령 ID (Command ID)**가 주어졌을 때, 다음으로 전이할 상태 인코딩과 해당 상태에서 사용될 파라미터 값을 정의합니다.
+*   **`generate_fsm.py`**: This is the main Python script. It parses the YAML configuration files and performs simulation, HDL generation, and/or Mermaid diagram generation.
+*   **`fsm_config.yaml`**: This YAML file defines the structure of the FSM. It includes:
+    *   FSM name.
+    *   State encoding width.
+    *   Input and output ports.
+    *   A list of states, their corresponding output values, and transition conditions.
+*   **`fsm_lut_ram_data.yaml`**: This YAML file configures the LUT RAM, which is used by the FSM (typically in an `IDLE` state) to determine the next state and associated parameters based on a `command_id_i` input. It defines:
+    *   LUT RAM address width.
+    *   Parameter fields (e.g., `repeat_count`, `data_length`) and their bit widths.
+    *   Initial entries for the LUT RAM, mapping specific addresses (command IDs) to next states and parameter values.
 
-LUT RAM 엔트리 필드:
+## Functionality
 
-address (명령 ID): IDLE 상태에서 FSM이 수신하는 외부 입력 값 (예: 8비트 커맨드 레지스터 값). 이 주소에 해당하는 LUT RAM 값을 읽어옵니다.
-예: 8비트 주소 (총 2 
-8
- =256개의 시퀀스 정의 가능)
-next_state_encoding: 다음 상태의 3비트 인코딩 값.
-param_value: 다음 상태로 전이될 때 함께 전달될 26비트 파라미터 값.
-{repeat_count[7:0], data_length[15:0], eof[0], sof[0]} 형태로 비트 연결 (concatenation)하여 저장합니다.
-LUT RAM Data Bit Width: 3(next_state)+26(param_value)=29 비트
+### FSM Simulation
+The `generate_fsm.py` script includes a Python-based FSM simulator (`FsmSimulator` class). This allows for pre-FPGA verification of the FSM logic by stepping through states based on configured inputs and LUT RAM data.
 
+### SystemVerilog Generation
+The script can generate a SystemVerilog HDL module (`sequencer_fsm.sv` by default) that implements the FSM and its LUT RAM. The generated Verilog is intended to be synthesizable for FPGA deployment. The LUT RAM can be written to and read from during runtime when the FSM is in a specific state (e.g., `RST`) via dedicated control signals.
+
+### Mermaid Diagram Generation
+To help visualize the FSM structure, the script can generate a state diagram in Mermaid markdown format (`fsm_diagram.md` by default). This diagram shows the states and transitions based on the `fsm_config.yaml` and `fsm_lut_ram_data.yaml`.
+
+## Usage
+
+1.  **Prepare Configuration Files:**
+    *   Ensure `fsm_config.yaml` and `fsm_lut_ram_data.yaml` are present, ideally in the root directory alongside `generate_fsm.py`.
+    *   The script `generate_fsm.py` includes a `__main__` block that demonstrates its usage. If these YAML files are not found when the script is run directly from its location, it will create dummy versions. For actual use, you should create and customize these files to define your specific FSM.
+    *   Example configuration files can be found in the `test/` directory. You can copy `test/fsm_config.yaml` and `test/fsm_lut_ram_data.yaml` to the root directory as a starting point.
+
+2.  **Run the Script:**
+    Execute the script from the root directory of the project:
+    ```bash
+    python generate_fsm.py
+    ```
+    This will typically:
+    *   Run a short Python simulation sequence (as defined in the `__main__` block of the script).
+    *   Generate `sequencer_fsm.sv` (SystemVerilog code).
+    *   Generate `fsm_diagram.md` (Mermaid diagram).
+
+## Key Files and Directories
+
+*   `generate_fsm.py`: Main script for FSM generation and simulation.
+*   `fsm_config.yaml`: Defines FSM states, transitions, inputs, and outputs.
+*   `fsm_lut_ram_data.yaml`: Defines LUT RAM parameters and initial entries.
+*   `sequencer_fsm.sv`: Generated SystemVerilog FSM module.
+*   `fsm_diagram.md`: Generated Mermaid state diagram.
+*   `README.md`: This file.
+*   `test/`: Contains example configuration files, a Verilog testbench (`sequencer_fsm_tb.sv`), and other test-related utilities.
+
+## Development Notes
+
+*   The FSM's `IDLE` state typically uses the `command_id_i` input to look up the next state and parameters from the LUT RAM.
+*   The `RST` state in the example configuration allows for reading from and writing to the LUT RAM via dedicated inputs (`lut_access_en_i`, `lut_read_write_mode_i`, `lut_write_data_i`).
+*   The Python simulator (`FsmSimulator`) provides a way to test FSM logic before synthesizing the Verilog.
+```
