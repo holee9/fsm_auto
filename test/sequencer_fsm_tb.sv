@@ -1,13 +1,18 @@
 //-----------------------------------------------------------------------------
 // Project      : FPGA Sequencer FSM
 // File         : sequencer_fsm_tb.sv
-// Author       : [Your Name]
-// Reviewer     : [Reviewer Name]
-// Company      : [Your Company]
-// Department   : [Your Department]
-// Created      : [YYYY-MM-DD]
-// Version      : 1.0
-// Tool Version : [Tool/Simulator Version]
+// Author       : [drake.lee]
+// Reviewer     : [holee]
+// Company      : [H&abyz]
+// Department   : [DR device development]
+// Created      : [2025-05-20]
+// Version      : 0.1
+// Tool Version : [vivado 2023.1]
+// ------------------------------------------------------------------------------
+// Revision History :
+//   - 0.0 : Initial version.
+//   - 0.1 : Added testbench for sequencer_fsm module
+// -----------------------------------------------------------------------------
 // Description  : 
 //   - Testbench for sequencer_fsm module.
 //   - Verifies state transitions, LUT RAM operation, repeat/timer/exit logic.
@@ -20,6 +25,7 @@
 // - Tests FSM state transitions, LUT RAM operations, and sequence execution
 // - Verifies repeat, timer, and exit signal handling
 // - Monitors state changes and sequence completion
+
 module sequencer_fsm_tb();
 
     // Clock period definition

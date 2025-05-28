@@ -1,13 +1,18 @@
 //-----------------------------------------------------------------------------
 // Project      : FPGA Sequencer FSM
 // File         : sequencer_fsm.sv
-// Author       : [Your Name]
-// Reviewer     : [Reviewer Name]
-// Company      : [Your Company]
-// Department   : [Your Department]
-// Created      : [YYYY-MM-DD]
-// Version      : 1.0
-// Tool Version : [Tool/Simulator Version]
+// Author       : [drake.lee]
+// Reviewer     : [holee]
+// Company      : [H&abyz]
+// Department   : [DR device development]
+// Created      : [2025-05-20]
+// Version      : 0.1
+// Tool Version : [vivado 2023.1]
+// ------------------------------------------------------------------------------
+// Revision History :
+//   - 0.0 : Initial version.
+//   - 0.1 : Added LUT RAM initialization and state transition logic.
+// -----------------------------------------------------------------------------
 // Description  : 
 //   - FPGA finite state machine for sequence control.
 //   - Executes command sequences from LUT RAM.
@@ -22,6 +27,7 @@
 // - Supports repeat, timer, and exit signal handling
 // - LUT RAM read/write in RST state
 // - State transitions based on command completion and internal timer
+
 module sequencer_fsm (
     // Clock and Reset
     input  logic                   clk,
